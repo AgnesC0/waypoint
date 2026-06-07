@@ -4,89 +4,101 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
 
-> A lightweight macOS desktop widget that watches your browser tabs and shows which project's Claude conversation is currently active — as a floating, always-on-top HUD.
+> A lightweight macOS HUD that tracks which Claude Code sessions belong to which project — and lets you jump back to them in one click.
 
 ---
 
-## What it does
+## How it works
 
-Waypoint scans your open browser tabs every few seconds using AppleScript, matches tab titles against a list of keywords you configure, and displays the matching project name and color in a small floating window. No cloud sync, no account required — just a config file and a Python process.
+When you run `claude` in a Terminal window, Waypoint detects the process, resolves its working directory, and matches the path against your project list in `config.yaml`. A floating HUD shows every active Claude session with its project name, color, and folder. Click any entry to bring that Terminal window to the front.
+
+```
+╔══════════════════════╗
+║ WAYPOINT             ║
+╠══════════════════════╣
+║▌ Project Alpha       ║  ← click to focus Terminal
+║  code/project-alpha  ║
+╠══════════════════════╣
+║▌ Project Beta        ║
+║  work/project-beta   ║
+╚══════════════════════╝
+```
 
 ---
 
 ## Features
 
-- **Auto-detection** — reads tab titles from Chrome, Arc, and Safari in real time
-- **Config-driven** — add any number of projects by editing one YAML file
-- **Floating HUD** — borderless, always-on-top window that stays out of your way
-- **Drag to reposition** — click and drag anywhere on the widget
-- **Opacity control** — right-click to choose 50 / 75 / 90 / 100 %
-- **Color accent** — each project gets its own accent color on the HUD
-- **Zero dependencies beyond PyYAML** — tkinter ships with Python on macOS
+- **Auto-detection** — finds every running `claude` process and resolves its working directory
+- **Click to focus** — click a session row to bring that Terminal window to the front
+- **Config-driven** — add projects by editing one YAML file, no code changes needed
+- **Always-on-top HUD** — borderless, transparent, floats above all windows
+- **Drag to reposition** — click-drag anywhere on the widget
+- **Opacity control** — right-click to adjust transparency (50 / 75 / 90 / 100%)
+- **Auto-launch** — optional shell hook starts Waypoint with every new terminal tab
+- **Zero runtime dependencies** beyond PyYAML — tkinter, lsof, and osascript are all macOS built-ins
 
 ---
 
-## Quick start (under 5 minutes)
+## Installation (5 minutes)
 
 ### 1. Prerequisites
 
 - macOS 12 Ventura or later
 - Python 3.10+ — check with `python3 --version`
-- Chrome, Arc, or Safari with at least one tab open
+- Claude Code CLI installed — check with `claude --version`
 
-### 2. Clone the repo
+### 2. Clone
 
 ```bash
-git clone https://github.com/your-username/waypoint.git
+git clone https://github.com/Agneschen99/waypoint.git
 cd waypoint
 ```
 
-### 3. Install dependencies
+### 3. Install the one dependency
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> **Tip:** use a virtual environment to keep things tidy:
+> Using a virtual environment is recommended:
 > ```bash
 > python3 -m venv .venv && source .venv/bin/activate
 > pip install -r requirements.txt
 > ```
 
-### 4. Grant Automation permissions
+### 4. Configure your projects
 
-Waypoint uses AppleScript to read browser tab titles.
-On first run macOS will ask for permission — click **OK** when prompted, or grant it manually:
-
-**System Settings → Privacy & Security → Automation**
-→ enable **Terminal** (or your IDE / launcher) → **Google Chrome / Arc / Safari**
-
-### 5. Edit config.yaml
-
-Open `config.yaml` and replace the example projects with your own:
+Open `config.yaml` and replace the example entries with your own:
 
 ```yaml
-poll_interval: 2        # seconds between scans
-opacity: 0.92           # window transparency (0.0–1.0)
-position: bottom-right  # top-left | top-right | bottom-left | bottom-right
-
 projects:
   - name: My Project
     keywords:
-      - my-project
-      - unique-slug
+      - my-project       # matched against your working directory path
     color: "#7e3af2"
 ```
 
-Any tab whose title contains one of the `keywords` (case-insensitive) will activate that project entry in the HUD.
+The keyword just needs to appear somewhere in the folder path where you run `claude`. If you work in `~/code/my-project`, the keyword `my-project` is all you need.
 
-### 6. Run
+### 5. Run
 
 ```bash
 python main.py
 ```
 
-A small floating window will appear in the corner you chose. Drag it anywhere, right-click for options, and it will update automatically as you switch tabs.
+The HUD appears in the corner configured by `position` in `config.yaml`. Open a new terminal, `cd` into a project, and run `claude` — Waypoint will detect it within a few seconds.
+
+---
+
+## Auto-launch on every terminal tab
+
+To have Waypoint start automatically whenever you open a new terminal:
+
+```bash
+echo 'source ~/waypoint/waypoint_launch.sh' >> ~/.zshrc
+```
+
+The launch script checks if Waypoint is already running before starting a new instance, so opening multiple tabs is safe.
 
 ---
 
@@ -94,54 +106,68 @@ A small floating window will appear in the corner you chose. Drag it anywhere, r
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `poll_interval` | float | `2` | Seconds between tab scans |
-| `opacity` | float | `0.92` | Window opacity, `0.0`–`1.0` |
-| `position` | string | `bottom-right` | Starting corner: `top-left`, `top-right`, `bottom-left`, `bottom-right` |
-| `projects[].name` | string | — | Display name shown in the HUD |
-| `projects[].keywords` | list | — | Strings to match against tab titles (substring, case-insensitive) |
-| `projects[].color` | string | — | Hex color for the accent bar and status dot |
+| `poll_interval` | float | `2` | Seconds between scans |
+| `opacity` | float | `0.92` | Window opacity `0.0`–`1.0` |
+| `position` | string | `bottom-right` | Starting corner: `top-left` `top-right` `bottom-left` `bottom-right` |
+| `projects[].name` | string | — | Display name in the HUD |
+| `projects[].keywords` | list | — | Substrings matched against the process working directory (case-insensitive) |
+| `projects[].color` | string | — | Hex accent color for the stripe and top bar |
 
-**Keyword tips:**
-- Use short, distinctive slugs that only appear in tabs related to that project.
-- A Claude conversation titled `"Project Alpha — Claude"` matches the keyword `alpha`.
-- Keywords are checked in order; the first project whose keyword matches wins.
+**Tips:**
+- Keywords match against the full path (e.g. `/Users/you/code/project-alpha`), so any unique directory name or path fragment works.
+- The first matching project wins — put more specific keywords earlier in the list.
+- You can run `python -c "from detector import Detector; d=Detector([]); print(d._run(['lsof','-a','-p','$(pgrep -x claude)','-d','cwd','-Fn']))"` to inspect what paths are being detected.
 
 ---
 
-## Project structure
+## Supported environments
 
-```
-waypoint/
-├── main.py          # Entry point — loads config and starts the event loop
-├── hud.py           # Floating HUD window (tkinter)
-├── detector.py      # AppleScript-based browser tab scanner
-├── config.yaml      # User configuration
-├── requirements.txt
-└── .gitignore
+| Component | Supported | Notes |
+|-----------|-----------|-------|
+| Terminal.app | ✅ | Click-to-focus works |
+| iTerm2 | 🔜 | Planned — process detection works, window focus not yet |
+| Claude Code CLI | ✅ | Detects the `claude` process |
+| macOS 12+ | ✅ | Requires Automation permission for Terminal |
+| macOS 11 or older | ⚠️ | Untested |
+
+---
+
+## Permissions
+
+On first run, macOS will ask for **Automation** permission so Waypoint can read Terminal window titles and focus windows via AppleScript. Grant it via:
+
+**System Settings → Privacy & Security → Automation → Terminal → enable Terminal.app**
+
+If the permission prompt doesn't appear, trigger it manually:
+
+```bash
+osascript -e 'tell application "Terminal" to get name of windows'
 ```
 
 ---
 
 ## Roadmap
 
-- [ ] **More browsers** — Firefox (via native messaging), Brave, Edge
-- [ ] **System tray / menu bar mode** — live in the macOS menu bar instead of a floating window using `rumps` or `PyObjC`
-- [ ] **Linux / Windows support** — `xdotool` on Linux, `pygetwindow` on Windows
+- [ ] **iTerm2 support** — window focus via iTerm2's AppleScript dictionary
+- [ ] **Menu bar / system tray mode** — live in the macOS menu bar using `rumps` instead of a floating window
+- [ ] **Multiple terminal emulators** — Warp, Alacritty, Ghostty
+- [ ] **Session timer** — track how long you've been active in each project
 - [ ] **Notifications** — optional macOS notification when the active project changes
-- [ ] **Sub-module integration** — designed to be embedded into larger productivity tools as a `detector` module; the `Detector` class has no UI dependency
-- [ ] **Multiple simultaneous projects** — show a stacked list when several project keywords are active at once
-- [ ] **Usage time tracking** — optional per-project timer that accumulates active seconds
+- [ ] **Cognitive scheduling integration** — designed as a sub-module that can be embedded into larger productivity or context-switching tools; `Detector` has no UI dependency
 
 ---
 
 ## Contributing
 
-Pull requests are welcome. Please open an issue first to discuss significant changes.
+Pull requests are welcome. Please open an issue first for significant changes.
 
-1. Fork the repo
-2. Create a feature branch: `git checkout -b feat/my-feature`
-3. Commit your changes
-4. Open a pull request
+```bash
+git checkout -b feat/my-feature
+# make changes
+git commit -m "feat: describe what and why"
+git push origin feat/my-feature
+# open a pull request
+```
 
 ---
 

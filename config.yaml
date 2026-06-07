@@ -1,44 +1,37 @@
-# ─────────────────────────────────────────────────────────────
-# Waypoint — configuration file
-# Edit this file to add your own projects and keywords.
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Waypoint — configuration
+#
+# Waypoint scans your running `claude` processes, resolves their working
+# directories, and matches the paths against the keywords you define here.
+# ─────────────────────────────────────────────────────────────────────────────
 
-# How often (in seconds) Waypoint scans your browser tabs.
-# Lower values = more responsive; higher values = less CPU usage.
+# Seconds between scans. Lower = more responsive; higher = less CPU.
 poll_interval: 2
 
-# Window opacity (0.0 = invisible, 1.0 = fully opaque).
+# Window transparency (0.0 = invisible, 1.0 = solid).
 opacity: 0.92
 
-# Initial window position. Options:
-#   top-left | top-right | bottom-left | bottom-right
+# Starting corner. Options: top-left | top-right | bottom-left | bottom-right
 position: bottom-right
 
-# ── Projects ─────────────────────────────────────────────────
-# Each entry needs:
-#   name     — display name shown in the HUD
-#   keywords — list of strings to match against open tab titles
-#              (case-insensitive substring match)
-#   color    — hex accent color for the HUD indicator
+# ── Projects ─────────────────────────────────────────────────────────────────
+# name     — label shown in the HUD
+# keywords — matched against the working-directory path of each claude process
+#            (case-insensitive substring match)
+# color    — hex accent color for the left stripe and top bar
 #
-# Tip: use keywords specific enough that they only appear in
-# tabs related to that project (e.g. a unique slug or codename).
-# ─────────────────────────────────────────────────────────────
+# Tip: use the folder name or a unique slug from your project path.
+# E.g. if you work in ~/code/project-alpha, the keyword "project-alpha" works.
+# ─────────────────────────────────────────────────────────────────────────────
 projects:
   - name: Project Alpha
     keywords:
+      - project-alpha
       - alpha
-      - project-a
     color: "#7e3af2"   # purple
 
   - name: Project Beta
     keywords:
+      - project-beta
       - beta
-      - project-b
     color: "#f97316"   # orange
-
-  - name: Project Gamma
-    keywords:
-      - gamma
-      - project-c
-    color: "#0ea5e9"   # sky blue

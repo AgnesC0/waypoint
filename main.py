@@ -1,10 +1,12 @@
 """
 main.py — Waypoint entry point.
 
-Loads config.yaml, wires up the detector and the HUD, then starts the
-tkinter event loop. Run this file directly:
-
+Usage:
     python main.py
+
+Loads config.yaml from the same directory, creates the Detector and HUD,
+and starts the tkinter event loop. The window runs until the user quits
+via the right-click menu or Ctrl-C.
 """
 
 import os
@@ -18,20 +20,15 @@ from hud import HUD
 
 
 def load_config() -> dict:
-    """
-    Load and return the YAML configuration file located in the same
-    directory as this script. Exits with a clear message if not found.
-    """
-    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-    if not os.path.exists(config_path):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+    if not os.path.exists(path):
         print(
-            f"[Waypoint] config.yaml not found at: {config_path}\n"
-            "Copy config.yaml from the repo root and edit it to get started.",
+            f"[Waypoint] config.yaml not found at: {path}\n"
+            "Copy it from the repo and edit to match your projects.",
             file=sys.stderr,
         )
         sys.exit(1)
-
-    with open(config_path, "r") as fh:
+    with open(path, "r") as fh:
         return yaml.safe_load(fh)
 
 
@@ -40,7 +37,10 @@ def main() -> None:
     projects = config.get("projects", [])
 
     if not projects:
-        print("[Waypoint] No projects defined in config.yaml — add at least one.", file=sys.stderr)
+        print(
+            "[Waypoint] No projects defined in config.yaml — add at least one entry.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     detector = Detector(projects)
