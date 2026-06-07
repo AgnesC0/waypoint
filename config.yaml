@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────
+# Waypoint — configuration file
+# Edit this file to add your own projects and keywords.
+# ─────────────────────────────────────────────────────────────
+
+# How often (in seconds) Waypoint scans your browser tabs.
+# Lower values = more responsive; higher values = less CPU usage.
+poll_interval: 2
+
+# Window opacity (0.0 = invisible, 1.0 = fully opaque).
+opacity: 0.92
+
+# Initial window position. Options:
+#   top-left | top-right | bottom-left | bottom-right
+position: bottom-right
+
+# ── Projects ─────────────────────────────────────────────────
+# Each entry needs:
+#   name     — display name shown in the HUD
+#   keywords — list of strings to match against open tab titles
+#              (case-insensitive substring match)
+#   color    — hex accent color for the HUD indicator
+#
+# Tip: use keywords specific enough that they only appear in
+# tabs related to that project (e.g. a unique slug or codename).
+# ─────────────────────────────────────────────────────────────
+projects:
+  - name: Project Alpha
+    keywords:
+      - alpha
+      - project-a
+    color: "#7e3af2"   # purple
+
+  - name: Project Beta
+    keywords:
+      - beta
+      - project-b
+    color: "#f97316"   # orange
+
+  - name: Project Gamma
+    keywords:
+      - gamma
+      - project-c
+    color: "#0ea5e9"   # sky blue
