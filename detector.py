@@ -209,6 +209,8 @@ class Detector:
             }
             for p in projects
         ]
+        # Preserve config.yaml order for HUD display.
+        self._order = {p["name"]: i for i, p in enumerate(self._projects)}
 
     def detect(self) -> list[Workspace]:
         """
@@ -247,9 +249,10 @@ class Detector:
                 tab_index=tty_to_tab_index.get(tty, 1),
             )
 
-        # Values are in first-insertion order (Python 3.7+), so display order
-        # reflects the order projects were first seen, not overwrite order.
-        return list(workspace_map.values())
+        # Return workspaces in config.yaml order, not detection order.
+        # last-match-wins dedup is preserved; only the final sort changes.
+        return sorted(workspace_map.values(),
+                      key=lambda ws: self._order.get(ws.name, len(self._projects)))
 
     def focus(self, workspace: Workspace) -> None:
         """
