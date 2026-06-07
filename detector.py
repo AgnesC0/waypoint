@@ -119,30 +119,41 @@ _SHELLS = {"zsh", "bash", "sh", "fish", "tcsh", "csh", "ksh"}
 
 def _shell_pids(tabs: list[dict]) -> dict[str, str]:
     """
-    Map tty → shell PID for each tab.
-    Uses one `ps -t <tty>` call per tab to find the shell process.
-    Returns only entries where a shell was found.
+    Map tty (full /dev/ttysNNN path) → shell PID using a single ps call.
+
+    Runs `ps -A -o pid,tty,comm` once and filters in Python, rather than
+    spawning one subprocess per tab. Only considers ttys belonging to the
+    Terminal tabs already enumerated by AppleScript; ignores everything else.
     """
+    known_ttys = {tab["tty"] for tab in tabs}
+    if not known_ttys:
+        return {}
+
+    raw = _run(["ps", "-A", "-o", "pid,tty,comm"])
     result: dict[str, str] = {}
 
-    for tab in tabs:
-        tty = tab["tty"].replace("/dev/", "")
-        raw = _run(["ps", "-t", tty, "-o", "pid,comm"])
+    for line in raw.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, tty_short, comm = parts
 
-        for line in raw.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) != 2:
-                continue
-            pid, comm = parts
-            try:
-                int(pid)  # skip header row
-            except ValueError:
-                continue
+        try:
+            int(pid)  # skip header row
+        except ValueError:
+            continue
 
-            base = comm.lstrip("-").split("/")[-1]
-            if base in _SHELLS:
-                result[tab["tty"]] = pid
-                break
+        if tty_short == "??":  # no controlling terminal
+            continue
+
+        # ps reports short form (e.g. s003); expand to full path
+        tty_full = f"/dev/tty{tty_short}"
+        if tty_full not in known_ttys:
+            continue
+
+        base = comm.lstrip("-").split("/")[-1]
+        if base in _SHELLS and tty_full not in result:
+            result[tty_full] = pid
 
     return result
 
@@ -218,24 +229,27 @@ class Detector:
         pid_to_tty = {pid: tty for tty, pid in tty_to_pid.items()}
         cwds = _batch_cwds(list(tty_to_pid.values()))
 
-        workspaces: list[Workspace] = []
-        seen: set[str] = set()
+        # Build a name → Workspace map so that later matches overwrite earlier
+        # ones for the same project. "Latest tab returned by AppleScript wins"
+        # is the tie-break rule — predictable, simple, no activity tracking.
+        workspace_map: dict[str, Workspace] = {}
 
         for pid, cwd in cwds.items():
             project = self._match(cwd)
-            if not project or project["name"] in seen:
+            if not project:
                 continue
 
-            seen.add(project["name"])
             tty = pid_to_tty.get(pid, "")
-            workspaces.append(Workspace(
+            workspace_map[project["name"]] = Workspace(
                 name=project["name"],
                 path=project["path"],
                 window_id=tty_to_window.get(tty, ""),
                 tab_index=tty_to_tab_index.get(tty, 1),
-            ))
+            )
 
-        return workspaces
+        # Values are in first-insertion order (Python 3.7+), so display order
+        # reflects the order projects were first seen, not overwrite order.
+        return list(workspace_map.values())
 
     def focus(self, workspace: Workspace) -> None:
         """
