@@ -1,33 +1,35 @@
 """
-hud.py — Borderless floating HUD for Waypoint.
+hud.py — Minimal floating HUD.
 
-Layout (per session detected):
-  ╔═══════════════════════╗  ← accent bar (project color)
-  ║ WAYPOINT              ║  ← static header
-  ╠═══════════════════════╣
-  ║▌ Project Alpha        ║  ← clickable session row
-  ║  ~/path/to/project    ║
-  ╠═══════════════════════╣
-  ║▌ Project Beta         ║  ← second session (if any)
-  ║  ~/other/path         ║
-  ╚═══════════════════════╝
+Design principles:
+  - Project names are the only content shown by default
+  - Path appears on hover, nothing else
+  - Monochrome only — no color coding, no icons, no badges
+  - Width: 160px. Height: auto from workspace count.
+  - Click → focus the workspace's terminal window, immediately
 
-Idle state:
-  ╔═══════════════════════╗
-  ║ WAYPOINT              ║
-  ║  no claude sessions   ║
-  ╚═══════════════════════╝
+The HUD never knows about PIDs, tty, or window IDs.
+It only knows about Workspace objects.
 """
 
 import tkinter as tk
 from tkinter import font as tkfont
 from typing import Optional
 
-# Fixed window width; height is recalculated after each poll
-_WIDTH = 230
-_HEADER_H = 34   # pixels for the WAYPOINT label row
-_ROW_H = 48      # pixels per session row
-_ACCENT_H = 3    # top accent bar height
+from detector import Workspace
+
+# ── Color palette (monochrome only) ─────────────────────────────────────────
+_BG          = "#0f0f0f"   # window background
+_FG_HEADER   = "#282828"   # "waypoint" label — intentionally dim
+_FG_NAME     = "#b0b0b0"   # project name, idle
+_FG_NAME_HOV = "#f2f2f2"   # project name, hovered
+_FG_PATH_HOV = "#484848"   # path text, hovered (only time it's visible)
+_BG_HOV      = "#191919"   # row background, hovered
+
+# ── Dimensions ───────────────────────────────────────────────────────────────
+_W        = 160    # fixed width
+_ROW_H    = 44     # fixed height per workspace row
+_HEADER_H = 32     # height of the "waypoint" header row
 
 
 class HUD:
@@ -35,247 +37,192 @@ class HUD:
         self.root = root
         self.config = config
         self.detector = detector
-
         self.poll_ms = int(config.get("poll_interval", 2) * 1000)
-        self.opacity = float(config.get("opacity", 0.92))
+        self.opacity  = float(config.get("opacity", 0.88))
         self.position = config.get("position", "bottom-right")
 
         self._drag_x = 0
         self._drag_y = 0
-        # Tracks dynamically-created session rows so they can be cleared
-        self._session_widgets: list[tk.Widget] = []
+        self._row_widgets: list[tk.Widget] = []
 
         self._setup_window()
-        self._build_chrome()
+        self._build_header()
         self._poll()
 
-    # -----------------------------------------------------------------------
-    # Window setup
-    # -----------------------------------------------------------------------
+    # ── Window ───────────────────────────────────────────────────────────────
 
     def _setup_window(self) -> None:
-        self.root.overrideredirect(True)           # no title bar
-        self.root.wm_attributes("-topmost", True)  # always on top
+        self.root.overrideredirect(True)
+        self.root.wm_attributes("-topmost", True)
         self.root.wm_attributes("-alpha", self.opacity)
-        self.root.configure(bg="#1e1e2e")
-        self._resize_and_position(n_rows=1)        # initial size
+        self.root.configure(bg=_BG)
+        self._set_geometry(n=1)
 
-    def _resize_and_position(self, n_rows: int) -> None:
-        """Recalculate window height and preserve current X/Y (or set initial)."""
-        h = _ACCENT_H + _HEADER_H + max(n_rows, 1) * _ROW_H + 6
+    def _set_geometry(self, n: int) -> None:
+        """Resize to fit n workspace rows and preserve current position."""
+        h = _HEADER_H + max(n, 1) * _ROW_H
         try:
             x, y = self.root.winfo_x(), self.root.winfo_y()
-            # winfo returns 0,0 before first draw; use configured position then
             if x == 0 and y == 0:
                 raise ValueError
         except Exception:
-            x, y = self._initial_xy(h)
-        self.root.geometry(f"{_WIDTH}x{h}+{x}+{y}")
+            x, y = self._initial_position(h)
+        self.root.geometry(f"{_W}x{h}+{x}+{y}")
 
-    def _initial_xy(self, h: int) -> tuple[int, int]:
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
+    def _initial_position(self, h: int) -> tuple[int, int]:
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         m = 16
-        table = {
+        return {
             "top-left":     (m,          40),
-            "top-right":    (sw - _WIDTH - m, 40),
+            "top-right":    (sw - _W - m, 40),
             "bottom-left":  (m,          sh - h - 40),
-            "bottom-right": (sw - _WIDTH - m, sh - h - 40),
-        }
-        return table.get(self.position, table["bottom-right"])
+            "bottom-right": (sw - _W - m, sh - h - 40),
+        }.get(self.position, (sw - _W - m, sh - h - 40))
 
-    # -----------------------------------------------------------------------
-    # Static chrome (accent bar + header)
-    # -----------------------------------------------------------------------
+    # ── Header ───────────────────────────────────────────────────────────────
 
-    def _build_chrome(self) -> None:
-        # Thin colored bar at top
-        self.accent_bar = tk.Frame(self.root, height=_ACCENT_H, bg="#4a4a6a")
-        self.accent_bar.pack(fill="x", side="top")
+    def _build_header(self) -> None:
+        header_font = tkfont.Font(family="SF Pro Text", size=9, weight="normal")
 
-        # Header
-        header = tk.Frame(self.root, bg="#1e1e2e", padx=12, pady=8)
-        header.pack(fill="x")
+        self.header = tk.Frame(self.root, bg=_BG, height=_HEADER_H)
+        self.header.pack(fill="x")
+        self.header.pack_propagate(False)
 
-        lbl_font = tkfont.Font(family="SF Pro Text", size=9, weight="bold")
         self._header_lbl = tk.Label(
-            header, text="WAYPOINT",
-            font=lbl_font, fg="#4a5568", bg="#1e1e2e",
+            self.header, text="waypoint",
+            font=header_font, fg=_FG_HEADER, bg=_BG, anchor="w",
         )
-        self._header_lbl.pack(side="left")
+        self._header_lbl.pack(side="left", padx=14, pady=0)
 
-        # Container where session rows are injected
-        self.body = tk.Frame(self.root, bg="#1e1e2e")
+        # Container where workspace rows live
+        self.body = tk.Frame(self.root, bg=_BG)
         self.body.pack(fill="both", expand=True)
 
-        # Bind drag + context menu to chrome widgets
-        for w in (self.root, self.accent_bar, header, self._header_lbl):
+        for w in (self.root, self.header, self._header_lbl):
             w.bind("<Button-1>",  self._drag_start)
             w.bind("<B1-Motion>", self._drag_move)
-            w.bind("<Button-2>",  self._show_menu)
-            w.bind("<Button-3>",  self._show_menu)
+            w.bind("<Button-2>",  self._menu)
+            w.bind("<Button-3>",  self._menu)
 
-    # -----------------------------------------------------------------------
-    # Drag
-    # -----------------------------------------------------------------------
+    # ── Drag ─────────────────────────────────────────────────────────────────
 
     def _drag_start(self, e: tk.Event) -> None:
         self._drag_x = e.x_root - self.root.winfo_x()
         self._drag_y = e.y_root - self.root.winfo_y()
 
     def _drag_move(self, e: tk.Event) -> None:
-        self.root.geometry(
-            f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}"
-        )
+        self.root.geometry(f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}")
 
-    # -----------------------------------------------------------------------
-    # Context menu
-    # -----------------------------------------------------------------------
+    # ── Context menu ─────────────────────────────────────────────────────────
 
-    def _show_menu(self, e: tk.Event) -> None:
-        menu = tk.Menu(
+    def _menu(self, e: tk.Event) -> None:
+        m = tk.Menu(
             self.root, tearoff=0,
-            bg="#2d2d3f", fg="#e2e8f0",
-            activebackground="#3d3d5f", activeforeground="#fff",
+            bg="#1a1a1a", fg="#c0c0c0",
+            activebackground="#2a2a2a", activeforeground="#f0f0f0",
             font=("SF Pro Text", 11), bd=0,
         )
-        opacity_sub = tk.Menu(
-            menu, tearoff=0, bg="#2d2d3f", fg="#e2e8f0",
-            activebackground="#3d3d5f", activeforeground="#fff",
-        )
+        sub = tk.Menu(m, tearoff=0, bg="#1a1a1a", fg="#c0c0c0",
+                      activebackground="#2a2a2a", activeforeground="#f0f0f0")
         for pct in [100, 90, 75, 50]:
-            opacity_sub.add_command(
+            sub.add_command(
                 label=f"{pct}%",
                 command=lambda p=pct: self.root.wm_attributes("-alpha", p / 100),
             )
-        menu.add_cascade(label="Opacity", menu=opacity_sub)
-        menu.add_separator()
-        menu.add_command(label="Quit Waypoint", command=self.root.destroy)
-        menu.tk_popup(e.x_root, e.y_root)
+        m.add_cascade(label="Opacity", menu=sub)
+        m.add_separator()
+        m.add_command(label="Quit", command=self.root.destroy)
+        m.tk_popup(e.x_root, e.y_root)
 
-    # -----------------------------------------------------------------------
-    # Poll loop
-    # -----------------------------------------------------------------------
+    # ── Poll loop ─────────────────────────────────────────────────────────────
 
     def _poll(self) -> None:
-        sessions = self.detector.detect()
-        self._refresh(sessions)
+        workspaces = self.detector.detect()
+        self._refresh(workspaces)
         self.root.after(self.poll_ms, self._poll)
 
-    # -----------------------------------------------------------------------
-    # Display refresh
-    # -----------------------------------------------------------------------
+    # ── Refresh ───────────────────────────────────────────────────────────────
 
-    def _refresh(self, sessions: list[dict]) -> None:
-        # Destroy previous dynamic rows
-        for w in self._session_widgets:
+    def _refresh(self, workspaces: list[Workspace]) -> None:
+        for w in self._row_widgets:
             w.destroy()
-        self._session_widgets.clear()
+        self._row_widgets.clear()
 
-        if sessions:
-            first_color = sessions[0]["project"].get("color", "#7e3af2")
-            self.accent_bar.config(bg=first_color)
-            for session in sessions:
-                row = self._make_session_row(session)
+        if workspaces:
+            for ws in workspaces:
+                row = self._workspace_row(ws)
                 row.pack(fill="x")
-                self._session_widgets.append(row)
+                self._row_widgets.append(row)
         else:
-            self.accent_bar.config(bg="#4a4a6a")
-            idle = self._make_idle_row()
+            idle = self._idle_row()
             idle.pack(fill="x")
-            self._session_widgets.append(idle)
+            self._row_widgets.append(idle)
 
-        self._resize_and_position(n_rows=max(len(sessions), 1))
+        self._set_geometry(n=max(len(workspaces), 1))
 
-    # -----------------------------------------------------------------------
-    # Row builders
-    # -----------------------------------------------------------------------
+    # ── Row builders ──────────────────────────────────────────────────────────
 
-    def _make_session_row(self, session: dict) -> tk.Frame:
-        project   = session["project"]
-        color     = project.get("color", "#7e3af2")
-        name      = project["name"]
-        cwd       = session.get("path", "")
-        window_id = session.get("window_id")
+    def _workspace_row(self, ws: Workspace) -> tk.Frame:
+        name_font = tkfont.Font(family="SF Pro Display", size=13, weight="normal")
+        path_font = tkfont.Font(family="SF Pro Mono",    size=10, weight="normal")
 
-        # Show last two path components as subtitle
-        parts = [p for p in cwd.strip("/").split("/") if p]
-        subtitle = "/".join(parts[-2:]) if parts else "claude active"
+        row = tk.Frame(self.body, bg=_BG, height=_ROW_H, cursor="hand2")
+        row.pack_propagate(False)
 
-        # ── Frame ──────────────────────────────────────────────────────────
-        row = tk.Frame(
-            self.body, bg="#1e1e2e",
-            cursor="hand2" if window_id else "arrow",
+        name_lbl = tk.Label(
+            row, text=ws.name,
+            font=name_font, fg=_FG_NAME, bg=_BG,
+            anchor="w",
         )
+        name_lbl.place(x=14, y=8)
 
-        # Colored left stripe
-        stripe = tk.Frame(row, width=3, bg=color)
-        stripe.pack(side="left", fill="y")
-
-        # Content
-        content = tk.Frame(row, bg="#1e1e2e", padx=10, pady=7)
-        content.pack(side="left", fill="both", expand=True)
-
-        name_font = tkfont.Font(family="SF Pro Display", size=12, weight="bold")
-        path_font = tkfont.Font(family="SF Pro Mono", size=10)
-
-        lbl_name = tk.Label(
-            content, text=name, font=name_font,
-            fg="#e2e8f0", bg="#1e1e2e", anchor="w",
+        # Path label — rendered invisible (fg = bg) until hover
+        path_lbl = tk.Label(
+            row, text=ws.display_path,
+            font=path_font, fg=_BG, bg=_BG,   # invisible by default
+            anchor="w",
         )
-        lbl_name.pack(fill="x")
+        path_lbl.place(x=14, y=26)
 
-        lbl_path = tk.Label(
-            content, text=subtitle, font=path_font,
-            fg="#64748b", bg="#1e1e2e", anchor="w",
-        )
-        lbl_path.pack(fill="x")
+        # ── Hover + click ────────────────────────────────────────────────────
+        all_w = [row, name_lbl, path_lbl]
 
-        # ── Hover + click bindings ──────────────────────────────────────────
-        # bg_targets: widgets whose background changes on hover (stripe excluded)
-        bg_targets = [row, content, lbl_name, lbl_path]
+        def enter(_e):
+            row.config(bg=_BG_HOV)
+            name_lbl.config(fg=_FG_NAME_HOV, bg=_BG_HOV)
+            path_lbl.config(fg=_FG_PATH_HOV, bg=_BG_HOV)
 
-        def enter(_e, targets=bg_targets):
-            for w in targets:
-                try:
-                    w.config(bg="#252535")
-                except tk.TclError:
-                    pass
+        def leave(_e):
+            row.config(bg=_BG)
+            name_lbl.config(fg=_FG_NAME, bg=_BG)
+            path_lbl.config(fg=_BG, bg=_BG)
 
-        def leave(_e, targets=bg_targets):
-            for w in targets:
-                try:
-                    w.config(bg="#1e1e2e")
-                except tk.TclError:
-                    pass
+        def click(_e):
+            self.detector.focus(ws)
 
-        def click(_e, wid=window_id):
-            if wid:
-                self.detector.focus_window(wid)
-
-        for w in bg_targets + [stripe]:
+        for w in all_w:
             w.bind("<Enter>",    enter)
             w.bind("<Leave>",    leave)
             w.bind("<Button-1>", click)
-            w.bind("<Button-2>", self._show_menu)
-            w.bind("<Button-3>", self._show_menu)
-
-        # Also let the row participate in window drag when not clicking a session
-        row.bind("<B1-Motion>", self._drag_move)
+            w.bind("<Button-2>", self._menu)
+            w.bind("<Button-3>", self._menu)
 
         return row
 
-    def _make_idle_row(self) -> tk.Frame:
-        row = tk.Frame(self.body, bg="#1e1e2e", padx=14, pady=12)
-        font = tkfont.Font(family="SF Pro Text", size=11)
-        tk.Label(
-            row, text="no claude sessions",
-            font=font, fg="#4a5568", bg="#1e1e2e",
-        ).pack(anchor="w")
+    def _idle_row(self) -> tk.Frame:
+        font = tkfont.Font(family="SF Pro Text", size=11, weight="normal")
+        row = tk.Frame(self.body, bg=_BG, height=_ROW_H)
+        row.pack_propagate(False)
 
-        # Idle row participates in drag
-        row.bind("<Button-1>",  self._drag_start)
-        row.bind("<B1-Motion>", self._drag_move)
-        row.bind("<Button-2>",  self._show_menu)
-        row.bind("<Button-3>",  self._show_menu)
+        tk.Label(
+            row, text="—",
+            font=font, fg=_FG_HEADER, bg=_BG, anchor="w",
+        ).place(x=14, y=13)
+
+        for w in (row,):
+            w.bind("<Button-1>",  self._drag_start)
+            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<Button-2>",  self._menu)
+            w.bind("<Button-3>",  self._menu)
+
         return row

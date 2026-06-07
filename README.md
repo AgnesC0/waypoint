@@ -4,173 +4,179 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
 
-> A lightweight macOS HUD that tracks which Claude Code sessions belong to which project — and lets you jump back to them in one click.
+> A workspace memory system for macOS. Click to return to where you were.
 
 ---
 
-## How it works
+## The problem
 
-When you run `claude` in a Terminal window, Waypoint detects the process, resolves its working directory, and matches the path against your project list in `config.yaml`. A floating HUD shows every active Claude session with its project name, color, and folder. Click any entry to bring that Terminal window to the front.
+After an hour of switching between projects, you have four terminal windows open and can't remember which one belongs to which project. You cycle through them. You lose 30 seconds. Every time.
+
+Waypoint solves this.
+
+---
+
+## What it does
+
+Waypoint runs as a small floating window in the corner of your screen. When you `cd` into a project and start `claude`, Waypoint notices and displays the project name. Click the name to bring that terminal window to the front — immediately, with no confirmation dialogs.
 
 ```
-╔══════════════════════╗
-║ WAYPOINT             ║
-╠══════════════════════╣
-║▌ Project Alpha       ║  ← click to focus Terminal
-║  code/project-alpha  ║
-╠══════════════════════╣
-║▌ Project Beta        ║
-║  work/project-beta   ║
-╚══════════════════════╝
+waypoint
+
+Project Alpha
+Project Beta
 ```
+
+Hover to see where each workspace is located:
+
+```
+waypoint
+
+Project Alpha
+~/code/project-alpha
+
+Project Beta
+~/work/project-beta
+```
+
+That's it. Nothing else is shown.
 
 ---
 
 ## Features
 
-- **Auto-detection** — finds every running `claude` process and resolves its working directory
-- **Click to focus** — click a session row to bring that Terminal window to the front
-- **Config-driven** — add projects by editing one YAML file, no code changes needed
-- **Always-on-top HUD** — borderless, transparent, floats above all windows
-- **Drag to reposition** — click-drag anywhere on the widget
-- **Opacity control** — right-click to adjust transparency (50 / 75 / 90 / 100%)
+- **Automatic detection** — registers workspaces as you work, no setup during normal use
+- **Click to focus** — one click brings the right terminal window to front
+- **Path-based matching** — tells projects apart by directory, not keyword guessing
+- **Minimal by design** — project names only; path appears on hover
+- **Monochrome** — no colors, no icons, no dashboard
+- **Always visible** — floats above all windows, drag anywhere, configurable opacity
 - **Auto-launch** — optional shell hook starts Waypoint with every new terminal tab
-- **Zero runtime dependencies** beyond PyYAML — tkinter, lsof, and osascript are all macOS built-ins
 
 ---
 
-## Installation (5 minutes)
+## Quick start
 
 ### 1. Prerequisites
 
 - macOS 12 Ventura or later
-- Python 3.10+ — check with `python3 --version`
-- Claude Code CLI installed — check with `claude --version`
+- Python 3.10 or later (`python3 --version`)
+- Claude Code CLI (`claude --version`)
 
 ### 2. Clone
 
 ```bash
-git clone https://github.com/Agneschen99/waypoint.git
-cd waypoint
+git clone https://github.com/Agneschen99/waypoint.git ~/waypoint
+cd ~/waypoint
 ```
 
-### 3. Install the one dependency
+### 3. Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> Using a virtual environment is recommended:
-> ```bash
-> python3 -m venv .venv && source .venv/bin/activate
-> pip install -r requirements.txt
-> ```
-
 ### 4. Configure your projects
 
-Open `config.yaml` and replace the example entries with your own:
+Edit `config.yaml`:
 
 ```yaml
 projects:
   - name: My Project
-    keywords:
-      - my-project       # matched against your working directory path
-    color: "#7e3af2"
+    path: ~/code/my-project
 ```
 
-The keyword just needs to appear somewhere in the folder path where you run `claude`. If you work in `~/code/my-project`, the keyword `my-project` is all you need.
+The `path` is matched against the working directory of each terminal session. Any subdirectory also counts, so `~/code/my-project/src` matches `~/code/my-project`.
 
-### 5. Run
+### 5. Grant permissions
+
+On first run, macOS will ask for **Automation** permission so Waypoint can read terminal window state via AppleScript.
+
+**System Settings → Privacy & Security → Automation → Terminal → Terminal.app ✓**
+
+If the prompt never appears, trigger it manually:
+
+```bash
+osascript -e 'tell application "Terminal" to get name of windows'
+```
+
+### 6. Run
 
 ```bash
 python main.py
 ```
 
-The HUD appears in the corner configured by `position` in `config.yaml`. Open a new terminal, `cd` into a project, and run `claude` — Waypoint will detect it within a few seconds.
+Open a new terminal, navigate to a configured project directory, and run `claude`. Waypoint will show the project name within a few seconds.
 
 ---
 
-## Auto-launch on every terminal tab
+## Auto-launch
 
-To have Waypoint start automatically whenever you open a new terminal:
+To start Waypoint automatically with every new terminal tab:
 
 ```bash
 echo 'source ~/waypoint/waypoint_launch.sh' >> ~/.zshrc
 ```
 
-The launch script checks if Waypoint is already running before starting a new instance, so opening multiple tabs is safe.
+The script checks for an existing instance before launching, so opening multiple tabs will not create duplicate windows.
 
 ---
 
 ## config.yaml reference
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `poll_interval` | float | `2` | Seconds between scans |
-| `opacity` | float | `0.92` | Window opacity `0.0`–`1.0` |
-| `position` | string | `bottom-right` | Starting corner: `top-left` `top-right` `bottom-left` `bottom-right` |
-| `projects[].name` | string | — | Display name in the HUD |
-| `projects[].keywords` | list | — | Substrings matched against the process working directory (case-insensitive) |
-| `projects[].color` | string | — | Hex accent color for the stripe and top bar |
+```yaml
+poll_interval: 2        # seconds between scans (default: 2)
+opacity: 0.88           # window opacity, 0.0–1.0 (default: 0.88)
+position: bottom-right  # starting corner (default: bottom-right)
+                        # options: top-left | top-right | bottom-left | bottom-right
 
-**Tips:**
-- Keywords match against the full path (e.g. `/Users/you/code/project-alpha`), so any unique directory name or path fragment works.
-- The first matching project wins — put more specific keywords earlier in the list.
-- You can run `python -c "from detector import Detector; d=Detector([]); print(d._run(['lsof','-a','-p','$(pgrep -x claude)','-d','cwd','-Fn']))"` to inspect what paths are being detected.
+projects:
+  - name: My Project    # displayed in the HUD
+    path: ~/code/my-project  # matched against terminal working directory
+```
+
+**How matching works:** Waypoint resolves all paths to their real absolute form (expanding `~`, following symlinks) and checks whether the shell's current working directory equals the project path or is a subdirectory of it.
 
 ---
 
 ## Supported environments
 
-| Component | Supported | Notes |
-|-----------|-----------|-------|
-| Terminal.app | ✅ | Click-to-focus works |
-| iTerm2 | 🔜 | Planned — process detection works, window focus not yet |
-| Claude Code CLI | ✅ | Detects the `claude` process |
-| macOS 12+ | ✅ | Requires Automation permission for Terminal |
-| macOS 11 or older | ⚠️ | Untested |
-
----
-
-## Permissions
-
-On first run, macOS will ask for **Automation** permission so Waypoint can read Terminal window titles and focus windows via AppleScript. Grant it via:
-
-**System Settings → Privacy & Security → Automation → Terminal → enable Terminal.app**
-
-If the permission prompt doesn't appear, trigger it manually:
-
-```bash
-osascript -e 'tell application "Terminal" to get name of windows'
-```
+| | Status |
+|---|---|
+| Terminal.app | ✅ full support |
+| iTerm2 | 🔜 roadmap |
+| macOS 12 Ventura and later | ✅ |
+| Claude Code CLI | ✅ detected as the active session |
+| Any shell (zsh, bash, fish) | ✅ |
 
 ---
 
 ## Roadmap
 
 - [ ] **iTerm2 support** — window focus via iTerm2's AppleScript dictionary
-- [ ] **Menu bar / system tray mode** — live in the macOS menu bar using `rumps` instead of a floating window
-- [ ] **Multiple terminal emulators** — Warp, Alacritty, Ghostty
-- [ ] **Session timer** — track how long you've been active in each project
-- [ ] **Notifications** — optional macOS notification when the active project changes
-- [ ] **Cognitive scheduling integration** — designed as a sub-module that can be embedded into larger productivity or context-switching tools; `Detector` has no UI dependency
+- [ ] **Menu bar mode** — live in the macOS menu bar rather than a floating window
+- [ ] **Session persistence** — remember last-seen workspaces across restarts
+- [ ] **Workspace timer** — optional per-project active-time counter
+- [ ] **Cognitive scheduling integration** — `Detector` is a dependency-free module designed to be embedded in larger context-switching or task-management systems
+
+---
+
+## Design principles
+
+Waypoint is a **workspace memory system**, not a process monitor.
+
+The user should never think about PIDs, tty devices, window IDs, or AppleScript. They think about one thing: *which project do I want to return to?*
+
+Every UI element was evaluated against one question: does this help the user instantly recognise and resume a workspace? If not, it was removed.
 
 ---
 
 ## Contributing
 
-Pull requests are welcome. Please open an issue first for significant changes.
-
-```bash
-git checkout -b feat/my-feature
-# make changes
-git commit -m "feat: describe what and why"
-git push origin feat/my-feature
-# open a pull request
-```
+Open an issue before significant changes. PRs are welcome.
 
 ---
 
 ## License
 
-[MIT](https://opensource.org/licenses/MIT) — use it, fork it, ship it.
+[MIT](https://opensource.org/licenses/MIT)

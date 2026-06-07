@@ -1,212 +1,257 @@
 """
-detector.py — Detect running Claude Code sessions via AppleScript + ps aux.
+detector.py — Workspace detection engine.
 
-Two-layer detection strategy:
-  1. ps aux  — find all claude processes and resolve their working directories
-               via a single batched lsof call
-  2. AppleScript — enumerate Terminal.app windows to get IDs and titles so
-                   the HUD can focus the right window on click
+Philosophy: the application thinks in Workspaces, not PIDs or windows.
+All implementation details (tty, lsof, AppleScript IDs) stay inside
+this module. Everything above gets clean Workspace objects.
 
-The two sources are cross-referenced: a process CWD is matched against project
-keywords, then the Terminal window whose title best matches that path is
-associated with the result.
+Detection pipeline:
+  1. AppleScript → enumerate Terminal tabs + their tty paths
+  2. ps          → find the shell PID for each tty
+  3. lsof        → resolve shell CWD (single batched call)
+  4. path match  → compare CWD against configured project paths
+  5. yield       → Workspace objects, one per matched project
 """
 
+import os
 import subprocess
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 
 # ---------------------------------------------------------------------------
-# Low-level helpers
+# Workspace — the only type the rest of the application touches
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Workspace:
+    name: str         # display name from config
+    path: str         # absolute real path from config
+    window_id: str    # Terminal window ID — used only for focus()
+    last_seen: float = field(default_factory=time.time)
+
+    @property
+    def display_path(self) -> str:
+        """Return a ~ abbreviated path suitable for display."""
+        home = os.path.expanduser("~")
+        return "~" + self.path[len(home):] if self.path.startswith(home) else self.path
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers (private to this module)
 # ---------------------------------------------------------------------------
 
 def _run(cmd: list[str], timeout: int = 3) -> str:
-    """Run a subprocess and return stdout; return '' on any error."""
+    """Run a subprocess, return stdout; silently return '' on any error."""
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if out.returncode == 0:
-            return out.stdout.strip()
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return result.stdout.strip()
     except Exception:
         pass
     return ""
 
 
 def _applescript(script: str) -> str:
-    """Execute an AppleScript snippet and return its stdout."""
     return _run(["osascript", "-e", script])
 
 
 # ---------------------------------------------------------------------------
-# Process detection (ps aux + lsof)
+# Step 1 — enumerate Terminal tabs
 # ---------------------------------------------------------------------------
 
-def get_claude_pids() -> list[str]:
+def _terminal_tabs() -> list[dict]:
     """
-    Return PIDs of all running processes whose command line contains 'claude'.
-    Excludes grep, waypoint itself, and Python to avoid false positives.
-    """
-    raw = _run(["ps", "aux"])
-    pids = []
-    for line in raw.splitlines():
-        parts = line.split(None, 10)
-        if len(parts) < 11:
-            continue
-        cmd = parts[10].lower()
-        if (
-            "claude" in cmd
-            and "grep" not in cmd
-            and "waypoint" not in cmd
-            and "detector" not in cmd
-        ):
-            pids.append(parts[1])  # PID is column 2
-    return pids
-
-
-def get_cwds(pids: list[str]) -> dict[str, str]:
-    """
-    Resolve working directories for a list of PIDs in a single lsof call.
-    Returns a dict mapping pid → absolute path.
-    """
-    if not pids:
-        return {}
-
-    raw = _run(["lsof", "-a", "-p", ",".join(pids), "-d", "cwd", "-Fn"], timeout=4)
-    result: dict[str, str] = {}
-    current_pid: Optional[str] = None
-
-    for line in raw.splitlines():
-        if line.startswith("p"):
-            current_pid = line[1:]
-        elif line.startswith("n") and current_pid:
-            result[current_pid] = line[1:]
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Terminal window enumeration (AppleScript)
-# ---------------------------------------------------------------------------
-
-def get_terminal_windows() -> list[dict]:
-    """
-    Return all Terminal.app windows as [{"id": str, "title": str}].
-    Uses a "|||" separator so commas inside titles are preserved.
-    Returns [] if Terminal is not running.
+    Return [{window_id, tty}] for every open Terminal.app tab.
+    Each tty is a device path like /dev/ttys003.
     """
     script = """
     tell application "System Events"
         if not (exists process "Terminal") then return ""
     end tell
     tell application "Terminal"
-        set result to {}
+        set rows to {}
         repeat with w in windows
             set wId to id of w
-            set wName to name of w
-            set end of result to (wId as string) & "|||" & wName
+            repeat with t in tabs of w
+                try
+                    set ttyPath to tty of t
+                    set end of rows to (wId as string) & "|||" & ttyPath
+                end try
+            end repeat
         end repeat
-        -- join with newlines so commas inside titles are safe
         set AppleScript's text item delimiters to linefeed
-        set result to result as string
+        set rows to rows as string
         set AppleScript's text item delimiters to ""
-        return result
+        return rows
     end tell
     """
     raw = _applescript(script)
     if not raw:
         return []
 
-    windows = []
+    tabs = []
     for line in raw.splitlines():
         line = line.strip()
-        if "|||" in line:
-            wid, title = line.split("|||", 1)
-            windows.append({"id": wid.strip(), "title": title.strip()})
-    return windows
+        if "|||" not in line:
+            continue
+        wid, tty = line.split("|||", 1)
+        tabs.append({"window_id": wid.strip(), "tty": tty.strip()})
+    return tabs
 
 
 # ---------------------------------------------------------------------------
-# Detector class
+# Step 2 — find shell PID for a tty
+# ---------------------------------------------------------------------------
+
+_SHELLS = {"zsh", "bash", "sh", "fish", "tcsh", "csh", "ksh"}
+
+
+def _shell_pids(tabs: list[dict]) -> dict[str, str]:
+    """
+    Map tty → shell PID for each tab.
+    Uses a single `ps` call per tty to find the shell process.
+    Returns only entries where a shell was found.
+    """
+    result: dict[str, str] = {}
+
+    for tab in tabs:
+        tty = tab["tty"].replace("/dev/", "")
+        raw = _run(["ps", "-t", tty, "-o", "pid,comm"])
+
+        for line in raw.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid, comm = parts
+            try:
+                int(pid)  # skip header row
+            except ValueError:
+                continue
+
+            # Normalize: strip leading dash (-zsh → zsh) and directory prefix
+            base = comm.lstrip("-").split("/")[-1]
+            if base in _SHELLS:
+                result[tab["tty"]] = pid
+                break
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — batch CWD resolution via lsof
+# ---------------------------------------------------------------------------
+
+def _batch_cwds(pids: list[str]) -> dict[str, str]:
+    """
+    Resolve working directories for multiple PIDs in a single lsof call.
+    Returns {pid: cwd_path}.
+    """
+    if not pids:
+        return {}
+
+    raw = _run(
+        ["lsof", "-a", "-p", ",".join(pids), "-d", "cwd", "-Fn"],
+        timeout=4,
+    )
+
+    cwds: dict[str, str] = {}
+    current_pid: Optional[str] = None
+
+    for line in raw.splitlines():
+        if line.startswith("p"):
+            current_pid = line[1:]
+        elif line.startswith("n") and current_pid:
+            cwds[current_pid] = line[1:]
+
+    return cwds
+
+
+# ---------------------------------------------------------------------------
+# Detector — public API
 # ---------------------------------------------------------------------------
 
 class Detector:
     """
-    Combines process and window data to produce a list of active Claude
-    sessions, each enriched with the matched project and a Terminal window
-    ID for click-to-focus.
+    Produces Workspace objects from the current terminal state.
+    Projects are configured by path (not keyword); matching is prefix-based
+    so subfolders within a project are also recognised.
     """
 
     def __init__(self, projects: list[dict]) -> None:
-        self.projects = projects
+        # Expand and resolve all project paths once at init time
+        self._projects = [
+            {
+                "name": p["name"],
+                "path": os.path.realpath(os.path.expanduser(p["path"])),
+            }
+            for p in projects
+        ]
 
-    # -- matching -----------------------------------------------------------
-
-    def _match_project(self, text: str) -> Optional[dict]:
-        """Return the first project whose keywords appear in text (case-insensitive)."""
-        lower = text.lower()
-        for project in self.projects:
-            for kw in project.get("keywords", []):
-                if kw.lower() in lower:
-                    return project
-        return None
-
-    def _find_window_for_path(
-        self, cwd: str, windows: list[dict]
-    ) -> Optional[str]:
+    def detect(self) -> list[Workspace]:
         """
-        Heuristic: check the last two path components of cwd against each
-        window title. Returns the window ID of the best match, or None.
+        Scan Terminal sessions and return one Workspace per active project.
+        Projects without a matching terminal tab are omitted.
         """
-        parts = [p for p in cwd.strip("/").split("/") if p]
-        candidates = parts[-2:] if len(parts) >= 2 else parts
+        tabs = _terminal_tabs()
+        if not tabs:
+            return []
 
-        for win in windows:
-            title_lower = win["title"].lower()
-            if any(c.lower() in title_lower for c in candidates):
-                return win["id"]
-        return None
+        # tty → shell pid
+        tty_to_pid = _shell_pids(tabs)
+        if not tty_to_pid:
+            return []
 
-    # -- public API ---------------------------------------------------------
+        # tty → window_id (for focus)
+        tty_to_window = {tab["tty"]: tab["window_id"] for tab in tabs}
 
-    def detect(self) -> list[dict]:
-        """
-        Return a list of active Claude sessions:
-          [{"project": {...}, "window_id": str|None, "path": str}]
+        # Batch CWD lookup
+        pid_to_tty = {pid: tty for tty, pid in tty_to_pid.items()}
+        cwds = _batch_cwds(list(tty_to_pid.values()))
 
-        Each entry represents one running claude process matched to a project.
-        Deduplicated by project name (first match wins).
-        """
-        pids = get_claude_pids()
-        cwd_map = get_cwds(pids)       # pid → cwd
-        windows = get_terminal_windows()
-
-        results: list[dict] = []
+        workspaces: list[Workspace] = []
         seen: set[str] = set()
 
-        for pid, cwd in cwd_map.items():
-            project = self._match_project(cwd)
+        for pid, cwd in cwds.items():
+            project = self._match(cwd)
             if not project or project["name"] in seen:
                 continue
 
             seen.add(project["name"])
-            results.append({
-                "project": project,
-                "window_id": self._find_window_for_path(cwd, windows),
-                "path": cwd,
-            })
+            tty = pid_to_tty.get(pid, "")
+            workspaces.append(Workspace(
+                name=project["name"],
+                path=project["path"],
+                window_id=tty_to_window.get(tty, ""),
+            ))
 
-        return results
+        return workspaces
 
-    def focus_window(self, window_id: str) -> None:
-        """Bring the Terminal window with the given ID to the front."""
-        script = f"""
+    def focus(self, workspace: Workspace) -> None:
+        """Bring the Terminal window for this workspace to the front."""
+        if not workspace.window_id:
+            return
+        _applescript(f"""
         tell application "Terminal"
             activate
             repeat with w in windows
-                if (id of w as string) is "{window_id}" then
+                if (id of w as string) is "{workspace.window_id}" then
                     set frontmost of w to true
                     exit repeat
                 end if
             end repeat
         end tell
+        """)
+
+    def _match(self, cwd: str) -> Optional[dict]:
         """
-        _applescript(script)
+        Match a CWD against configured project paths.
+        Accepts exact matches and subdirectories.
+        """
+        real = os.path.realpath(cwd)
+        for project in self._projects:
+            p = project["path"]
+            if real == p or real.startswith(p + os.sep):
+                return project
+        return None
