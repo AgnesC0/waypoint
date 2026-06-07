@@ -6,10 +6,10 @@ All implementation details (tty, lsof, AppleScript IDs) stay inside
 this module. Everything above gets clean Workspace objects.
 
 Detection pipeline:
-  1. AppleScript → enumerate Terminal tabs + their tty paths
+  1. AppleScript → enumerate Terminal tabs + their tty paths + tab indices
   2. ps          → find the shell PID for each tty
   3. lsof        → resolve shell CWD (single batched call)
-  4. path match  → compare CWD against configured project paths
+  4. path match  → compare CWD variants against configured project paths
   5. yield       → Workspace objects, one per matched project
 """
 
@@ -28,7 +28,8 @@ from typing import Optional
 class Workspace:
     name: str         # display name from config
     path: str         # absolute real path from config
-    window_id: str    # Terminal window ID — used only for focus()
+    window_id: str    # Terminal window ID — used only inside focus()
+    tab_index: int    # 1-based index of the tab within its window
     last_seen: float = field(default_factory=time.time)
 
     @property
@@ -58,13 +59,14 @@ def _applescript(script: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — enumerate Terminal tabs
+# Step 1 — enumerate Terminal tabs (window_id + tty + tab_index)
 # ---------------------------------------------------------------------------
 
 def _terminal_tabs() -> list[dict]:
     """
-    Return [{window_id, tty}] for every open Terminal.app tab.
-    Each tty is a device path like /dev/ttys003.
+    Return [{window_id, tty, tab_index}] for every open Terminal.app tab.
+    tab_index is 1-based and matches the AppleScript tab ordinal within
+    its parent window — required for accurate tab-level focus.
     """
     script = """
     tell application "System Events"
@@ -74,10 +76,12 @@ def _terminal_tabs() -> list[dict]:
         set rows to {}
         repeat with w in windows
             set wId to id of w
+            set tabIdx to 0
             repeat with t in tabs of w
+                set tabIdx to tabIdx + 1
                 try
                     set ttyPath to tty of t
-                    set end of rows to (wId as string) & "|||" & ttyPath
+                    set end of rows to (wId as string) & "|||" & ttyPath & "|||" & (tabIdx as string)
                 end try
             end repeat
         end repeat
@@ -96,8 +100,13 @@ def _terminal_tabs() -> list[dict]:
         line = line.strip()
         if "|||" not in line:
             continue
-        wid, tty = line.split("|||", 1)
-        tabs.append({"window_id": wid.strip(), "tty": tty.strip()})
+        parts = line.split("|||", 2)
+        if len(parts) < 2:
+            continue
+        wid = parts[0].strip()
+        tty = parts[1].strip()
+        tab_index = int(parts[2].strip()) if len(parts) > 2 and parts[2].strip().isdigit() else 1
+        tabs.append({"window_id": wid, "tty": tty, "tab_index": tab_index})
     return tabs
 
 
@@ -111,7 +120,7 @@ _SHELLS = {"zsh", "bash", "sh", "fish", "tcsh", "csh", "ksh"}
 def _shell_pids(tabs: list[dict]) -> dict[str, str]:
     """
     Map tty → shell PID for each tab.
-    Uses a single `ps` call per tty to find the shell process.
+    Uses one `ps -t <tty>` call per tab to find the shell process.
     Returns only entries where a shell was found.
     """
     result: dict[str, str] = {}
@@ -130,7 +139,6 @@ def _shell_pids(tabs: list[dict]) -> dict[str, str]:
             except ValueError:
                 continue
 
-            # Normalize: strip leading dash (-zsh → zsh) and directory prefix
             base = comm.lstrip("-").split("/")[-1]
             if base in _SHELLS:
                 result[tab["tty"]] = pid
@@ -175,16 +183,18 @@ def _batch_cwds(pids: list[str]) -> dict[str, str]:
 class Detector:
     """
     Produces Workspace objects from the current terminal state.
-    Projects are configured by path (not keyword); matching is prefix-based
-    so subfolders within a project are also recognised.
+    Projects are configured by path; matching is prefix-based and
+    symlink-tolerant so subdirectories and path aliases are recognised.
     """
 
     def __init__(self, projects: list[dict]) -> None:
-        # Expand and resolve all project paths once at init time
+        # Store both realpath and abspath variants for each project so
+        # _match() can compare against whichever form the OS returns.
         self._projects = [
             {
                 "name": p["name"],
-                "path": os.path.realpath(os.path.expanduser(p["path"])),
+                "path":     os.path.realpath(os.path.expanduser(p["path"])),
+                "path_abs": os.path.abspath(os.path.expanduser(p["path"])),
             }
             for p in projects
         ]
@@ -198,15 +208,13 @@ class Detector:
         if not tabs:
             return []
 
-        # tty → shell pid
         tty_to_pid = _shell_pids(tabs)
         if not tty_to_pid:
             return []
 
-        # tty → window_id (for focus)
-        tty_to_window = {tab["tty"]: tab["window_id"] for tab in tabs}
+        tty_to_window    = {tab["tty"]: tab["window_id"]  for tab in tabs}
+        tty_to_tab_index = {tab["tty"]: tab["tab_index"]  for tab in tabs}
 
-        # Batch CWD lookup
         pid_to_tty = {pid: tty for tty, pid in tty_to_pid.items()}
         cwds = _batch_cwds(list(tty_to_pid.values()))
 
@@ -224,19 +232,36 @@ class Detector:
                 name=project["name"],
                 path=project["path"],
                 window_id=tty_to_window.get(tty, ""),
+                tab_index=tty_to_tab_index.get(tty, 1),
             ))
 
         return workspaces
 
     def focus(self, workspace: Workspace) -> None:
-        """Bring the Terminal window for this workspace to the front."""
+        """
+        Bring the Terminal window (and correct tab) for this workspace to front.
+
+        Order of operations:
+          1. Activate Terminal.app
+          2. Find the window by window_id
+          3. Un-minimise if needed
+          4. Select the correct tab (graceful fallback to window-level if it fails)
+          5. Set frontmost
+        """
         if not workspace.window_id:
             return
+
+        tab_idx = workspace.tab_index or 1
+
         _applescript(f"""
         tell application "Terminal"
             activate
             repeat with w in windows
                 if (id of w as string) is "{workspace.window_id}" then
+                    if miniaturized of w then set miniaturized of w to false
+                    try
+                        set selected tab of w to tab {tab_idx} of w
+                    end try
                     set frontmost of w to true
                     exit repeat
                 end if
@@ -247,11 +272,22 @@ class Detector:
     def _match(self, cwd: str) -> Optional[dict]:
         """
         Match a CWD against configured project paths.
-        Accepts exact matches and subdirectories.
+
+        Generates multiple normalised variants of the incoming CWD (realpath,
+        abspath, original) and compares each against both the realpath and
+        abspath variants stored for each project. This handles macOS path
+        aliases such as /tmp → /private/tmp and symlinked project directories.
         """
-        real = os.path.realpath(cwd)
+        cwd_variants = {
+            os.path.realpath(cwd),
+            os.path.abspath(cwd),
+            cwd,
+        }
+
         for project in self._projects:
-            p = project["path"]
-            if real == p or real.startswith(p + os.sep):
-                return project
+            for proj_path in (project["path"], project["path_abs"]):
+                for v in cwd_variants:
+                    if v == proj_path or v.startswith(proj_path + os.sep):
+                        return project
+
         return None
