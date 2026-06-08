@@ -146,8 +146,8 @@ def _shell_pids(tabs: list[dict]) -> dict[str, str]:
         if tty_short == "??":  # no controlling terminal
             continue
 
-        # ps reports short form (e.g. s003); expand to full path
-        tty_full = f"/dev/tty{tty_short}"
+        # ps reports e.g. ttys003; prepend /dev/ to get full path
+        tty_full = f"/dev/{tty_short}"
         if tty_full not in known_ttys:
             continue
 
@@ -230,6 +230,9 @@ class Detector:
 
         pid_to_tty = {pid: tty for tty, pid in tty_to_pid.items()}
         cwds = _batch_cwds(list(tty_to_pid.values()))
+
+        if not cwds:
+            return []
 
         # Build a name → Workspace map so that later matches overwrite earlier
         # ones for the same project. "Latest tab returned by AppleScript wins"

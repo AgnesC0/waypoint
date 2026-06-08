@@ -8,8 +8,8 @@ opacity: 0.88          # window opacity  (0.0 – 1.0)
 position: bottom-right # top-left | top-right | bottom-left | bottom-right
 
 projects:
-  - name: Project Alpha
-    path: ~/code/project-alpha
+  - name: Waypoint
+    path: ~/waypoint
 
-  - name: Project Beta
-    path: ~/code/project-beta
+  - name: CogPass Light
+    path: ~/CogPass-Light
