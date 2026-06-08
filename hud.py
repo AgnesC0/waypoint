@@ -20,17 +20,20 @@ from detector import Workspace
 from logger import WorkspaceLogger
 
 # ── Color palette (monochrome only) ─────────────────────────────────────────
-_BG          = "#0f0f0f"   # window background
-_FG_HEADER   = "#282828"   # "waypoint" label — intentionally dim
+_BG          = "#0f0f0f"   # row/body background
+_BG_HANDLE   = "#141414"   # drag handle — distinct chrome zone
+_BG_HOV      = "#191919"   # row hover background
+_DIVIDER     = "#1d1d1d"   # 1px separator between handle and rows
+_FG_HANDLE   = "#252525"   # "waypoint" label in handle
+_FG_IDLE     = "#282828"   # "—" dash when no workspaces are active
 _FG_NAME     = "#b0b0b0"   # project name, idle
 _FG_NAME_HOV = "#f2f2f2"   # project name, hovered
 _FG_PATH_HOV = "#484848"   # path text, hovered (only time it's visible)
-_BG_HOV      = "#191919"   # row background, hovered
 
 # ── Dimensions ───────────────────────────────────────────────────────────────
-_W        = 160    # fixed width
-_ROW_H    = 44     # fixed height per workspace row
-_HEADER_H = 32     # height of the "waypoint" header row
+_W         = 160   # fixed width
+_ROW_H     = 44    # workspace row height
+_HANDLE_H  = 20    # drag handle height (chrome-only zone, not clickable as row)
 
 
 class HUD:
@@ -62,7 +65,7 @@ class HUD:
 
     def _set_geometry(self, n: int) -> None:
         """Resize to fit n workspace rows and preserve current position."""
-        h = _HEADER_H + max(n, 1) * _ROW_H
+        h = _HANDLE_H + 1 + max(n, 1) * _ROW_H  # handle + divider + rows
         try:
             x, y = self.root.winfo_x(), self.root.winfo_y()
             if x == 0 and y == 0:
@@ -81,30 +84,43 @@ class HUD:
             "bottom-right": (sw - _W - m, sh - h - 40),
         }.get(self.position, (sw - _W - m, sh - h - 40))
 
-    # ── Header ───────────────────────────────────────────────────────────────
+    # ── Chrome (handle + divider) ─────────────────────────────────────────────
 
     def _build_header(self) -> None:
-        header_font = tkfont.Font(family="SF Pro Text", size=9, weight="normal")
+        handle_font = tkfont.Font(family="SF Pro Text", size=9, weight="normal")
 
-        self.header = tk.Frame(self.root, bg=_BG, height=_HEADER_H)
-        self.header.pack(fill="x")
-        self.header.pack_propagate(False)
-
-        self._header_lbl = tk.Label(
-            self.header, text="waypoint",
-            font=header_font, fg=_FG_HEADER, bg=_BG, anchor="w",
+        # Drag handle — the only draggable surface. cursor="fleur" signals
+        # that this area moves the window; workspace rows are never in here.
+        self.handle = tk.Frame(
+            self.root, bg=_BG_HANDLE, height=_HANDLE_H, cursor="fleur",
         )
-        self._header_lbl.pack(side="left", padx=14, pady=0)
+        self.handle.pack(fill="x")
+        self.handle.pack_propagate(False)
+
+        self._handle_lbl = tk.Label(
+            self.handle, text="waypoint",
+            font=handle_font, fg=_FG_HANDLE, bg=_BG_HANDLE, anchor="w",
+        )
+        self._handle_lbl.pack(side="left", padx=10, pady=0)
+
+        # 1px visual separator — reinforces the chrome / content boundary
+        tk.Frame(self.root, bg=_DIVIDER, height=1).pack(fill="x")
 
         # Container where workspace rows live
         self.body = tk.Frame(self.root, bg=_BG)
         self.body.pack(fill="both", expand=True)
 
-        for w in (self.root, self.header, self._header_lbl):
+        # Drag bindings live only on the handle — never on rows or root
+        for w in (self.handle, self._handle_lbl):
             w.bind("<Button-1>",  self._drag_start)
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<Button-2>",  self._menu)
             w.bind("<Button-3>",  self._menu)
+
+        # Context menu reachable from body and root as well
+        for w in (self.root, self.body):
+            w.bind("<Button-2>", self._menu)
+            w.bind("<Button-3>", self._menu)
 
     # ── Drag ─────────────────────────────────────────────────────────────────
 
@@ -223,13 +239,10 @@ class HUD:
 
         tk.Label(
             row, text="—",
-            font=font, fg=_FG_HEADER, bg=_BG, anchor="w",
+            font=font, fg=_FG_IDLE, bg=_BG, anchor="w",
         ).place(x=14, y=13)
 
-        for w in (row,):
-            w.bind("<Button-1>",  self._drag_start)
-            w.bind("<B1-Motion>", self._drag_move)
-            w.bind("<Button-2>",  self._menu)
-            w.bind("<Button-3>",  self._menu)
+        row.bind("<Button-2>", self._menu)
+        row.bind("<Button-3>", self._menu)
 
         return row
