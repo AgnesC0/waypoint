@@ -1,155 +1,309 @@
 """
-hud.py — Minimal floating HUD.
+hud.py — Ambient workspace indicator.
 
-Design principles:
-  - Project names are the only content shown by default
-  - Path appears on hover, nothing else
-  - Monochrome only — no color coding, no icons, no badges
-  - Width: 160px. Height: auto from workspace count.
-  - Click → focus the workspace's terminal window, immediately
+Two states:
+  Collapsed (default) — a 30px pill showing ● current workspace.
+                        The entire pill is a drag target. Nothing is clickable.
+  Expanded (on click) — pill grows into a compact switcher list.
+                        Click a row to focus that terminal and collapse.
+                        Auto-collapses after 4 seconds.
 
-The HUD never knows about PIDs, tty, or window IDs.
-It only knows about Workspace objects.
+Drag vs click is disambiguated by a movement threshold: press + move > 4px
+is a drag; press + release in place is a click (toggle expand).
 """
 
+import sys
 import tkinter as tk
-from tkinter import font as tkfont
 from typing import Optional
 
 from detector import Workspace
 from logger import WorkspaceLogger
 
-# ── Color palette (monochrome only) ─────────────────────────────────────────
-_BG          = "#0f0f0f"   # row/body background
-_BG_HANDLE   = "#141414"   # drag handle — distinct chrome zone
-_BG_HOV      = "#191919"   # row hover background
-_DIVIDER     = "#1d1d1d"   # 1px separator between handle and rows
-_FG_HANDLE   = "#252525"   # "waypoint" label in handle
-_FG_IDLE     = "#282828"   # "—" dash when no workspaces are active
-_FG_NAME     = "#b0b0b0"   # project name, idle
-_FG_NAME_HOV = "#f2f2f2"   # project name, hovered
-_FG_PATH_HOV = "#484848"   # path text, hovered (only time it's visible)
 
-# ── Dimensions ───────────────────────────────────────────────────────────────
-_W         = 160   # fixed width
-_ROW_H     = 44    # workspace row height
-_HANDLE_H  = 20    # drag handle height (chrome-only zone, not clickable as row)
+# ── Palette ───────────────────────────────────────────────────────────────────
+_TRANSP    = 'black'    # mapped to true transparency on macOS via -transparent
+_PILL      = '#1c1c1e'  # pill surface (macOS dark systemBackground)
+_EDGE      = '#3a3a3c'  # 1px subtle outline
+_SEP       = '#38383a'  # divider between header and list
+_DOT       = '#32d74b'  # active dot + checkmark (system green)
+_TXT_ON    = '#f2f2f7'  # current workspace name
+_TXT_OFF   = '#8e8e93'  # inactive workspace names
+_HOVER     = '#2c2c2e'  # row hover fill
 
+# ── Geometry ──────────────────────────────────────────────────────────────────
+_W      = 160   # pill width
+_PILL_H = 30    # collapsed height
+_ITEM_H = 30    # expanded row height
+_R      = 12    # corner radius
+_PAD    = 12    # left padding for all text
+
+# ── Behaviour ─────────────────────────────────────────────────────────────────
+_DRAG_PX  = 4     # movement threshold to distinguish drag from click
+_CLOSE_MS = 4000  # auto-collapse delay (ms)
+
+# ── Platform fonts ────────────────────────────────────────────────────────────
+if sys.platform == 'darwin':
+    _F_NAME  = ('SF Pro Display', 12)
+    _F_LIST  = ('SF Pro Text',    12)
+    _F_CHECK = ('SF Pro Text',    11)
+    _F_DOT   = ('SF Pro Display',  8)
+else:
+    _F_NAME  = ('Segoe UI', 11)
+    _F_LIST  = ('Segoe UI', 11)
+    _F_CHECK = ('Segoe UI', 10)
+    _F_DOT   = ('Segoe UI',  8)
+
+
+# ── Rounded-rectangle helper ──────────────────────────────────────────────────
+
+def _rrect(cv: tk.Canvas, x1: int, y1: int, x2: int, y2: int, r: int, **kw):
+    """Smooth rounded rectangle via B-spline polygon."""
+    pts = [
+        x1+r, y1,   x2-r, y1,    # top
+        x2,   y1,   x2,   y1+r,  # top-right
+        x2,   y2-r, x2,   y2,    # right
+        x2-r, y2,   x1+r, y2,    # bottom
+        x1,   y2,   x1,   y2-r,  # bottom-left
+        x1,   y1+r, x1,   y1,    # left
+    ]
+    cv.create_polygon(pts, smooth=True, **kw)
+
+
+# ── HUD ───────────────────────────────────────────────────────────────────────
 
 class HUD:
     def __init__(self, root: tk.Tk, config: dict, detector) -> None:
-        self.root = root
-        self.config = config
+        self.root     = root
         self.detector = detector
-        self.poll_ms = int(config.get("poll_interval", 2) * 1000)
-        self.opacity  = float(config.get("opacity", 0.88))
-        self.position = config.get("position", "bottom-right")
+        self.poll_ms  = int(config.get('poll_interval', 2) * 1000)
+        self.position = config.get('position', 'bottom-right')
+        self._opacity = float(config.get('opacity', 0.88))
+        self._logger  = WorkspaceLogger()
 
-        self._drag_x = 0
-        self._drag_y = 0
-        self._row_widgets: list[tk.Widget] = []
-        self._logger = WorkspaceLogger()
+        # Display state
+        self._expanded: bool             = False
+        self._current_name: Optional[str] = None
+        self._workspaces: list[Workspace] = []
+        self._hover_name: Optional[str]   = None
+        self._close_job                   = None
 
-        self._setup_window()
-        self._build_header()
+        # Drag state
+        self._px = self._py = 0
+        self._ox = self._oy = 0
+        self._dragged = False
+        self._eat_release = False  # absorbs canvas release after a row click
+
+        self._init_window()
+        self._init_canvas()
         self._poll()
 
-    # ── Window ───────────────────────────────────────────────────────────────
+    # ── Window ────────────────────────────────────────────────────────────────
 
-    def _setup_window(self) -> None:
+    def _init_window(self) -> None:
         self.root.overrideredirect(True)
-        self.root.wm_attributes("-topmost", True)
-        self.root.wm_attributes("-alpha", self.opacity)
-        self.root.configure(bg=_BG)
-        self._set_geometry(n=1)
+        self.root.wm_attributes('-topmost', True)
+        self.root.wm_attributes('-alpha', self._opacity)
+        # True per-pixel transparency on macOS: pixels painted with bg colour
+        # are fully composited against the desktop, not the window surface.
+        try:
+            self.root.wm_attributes('-transparent', True)
+            self.root.configure(bg=_TRANSP)
+            self._transp = True
+        except tk.TclError:
+            self.root.configure(bg=_PILL)
+            self._transp = False
+        self._refit()
 
-    def _set_geometry(self, n: int) -> None:
-        """Resize to fit n workspace rows and preserve current position."""
-        h = _HANDLE_H + 1 + max(n, 1) * _ROW_H  # handle + divider + rows
+    def _height(self) -> int:
+        if not self._expanded or not self._workspaces:
+            return _PILL_H
+        return _PILL_H + 1 + len(self._workspaces) * _ITEM_H + 4
+
+    def _refit(self) -> None:
+        h = self._height()
         try:
             x, y = self.root.winfo_x(), self.root.winfo_y()
             if x == 0 and y == 0:
                 raise ValueError
         except Exception:
-            x, y = self._initial_position(h)
-        self.root.geometry(f"{_W}x{h}+{x}+{y}")
+            x, y = self._initial_xy(h)
+        self.root.geometry(f'{_W}x{h}+{x}+{y}')
 
-    def _initial_position(self, h: int) -> tuple[int, int]:
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        m = 16
+    def _initial_xy(self, h: int) -> tuple[int, int]:
+        sw, sh, m = self.root.winfo_screenwidth(), self.root.winfo_screenheight(), 16
         return {
-            "top-left":     (m,          40),
-            "top-right":    (sw - _W - m, 40),
-            "bottom-left":  (m,          sh - h - 40),
-            "bottom-right": (sw - _W - m, sh - h - 40),
-        }.get(self.position, (sw - _W - m, sh - h - 40))
+            'top-left':     (m,       40),
+            'top-right':    (sw-_W-m, 40),
+            'bottom-left':  (m,       sh-h-40),
+            'bottom-right': (sw-_W-m, sh-h-40),
+        }.get(self.position, (sw-_W-m, sh-h-40))
 
-    # ── Chrome (handle + divider) ─────────────────────────────────────────────
+    # ── Canvas ────────────────────────────────────────────────────────────────
 
-    def _build_header(self) -> None:
-        handle_font = tkfont.Font(family="SF Pro Text", size=9, weight="normal")
+    def _init_canvas(self) -> None:
+        bg = _TRANSP if self._transp else _PILL
+        self._cv = tk.Canvas(self.root, bg=bg, highlightthickness=0, bd=0)
+        self._cv.place(x=0, y=0, relwidth=1, relheight=1)
+        self._cv.bind('<Button-1>',        self._press)
+        self._cv.bind('<B1-Motion>',       self._drag)
+        self._cv.bind('<ButtonRelease-1>', self._release)
+        self._cv.bind('<Button-2>',        self._ctx_menu)
+        self._cv.bind('<Button-3>',        self._ctx_menu)
 
-        # Drag handle — the only draggable surface. cursor="fleur" signals
-        # that this area moves the window; workspace rows are never in here.
-        self.handle = tk.Frame(
-            self.root, bg=_BG_HANDLE, height=_HANDLE_H, cursor="fleur",
-        )
-        self.handle.pack(fill="x")
-        self.handle.pack_propagate(False)
+    # ── Drawing ───────────────────────────────────────────────────────────────
 
-        self._handle_lbl = tk.Label(
-            self.handle, text="waypoint",
-            font=handle_font, fg=_FG_HANDLE, bg=_BG_HANDLE, anchor="w",
-        )
-        self._handle_lbl.pack(side="left", padx=10, pady=0)
+    def _redraw(self) -> None:
+        self._refit()
+        cv = self._cv
+        cv.delete('all')
+        h = self._height()
 
-        # 1px visual separator — reinforces the chrome / content boundary
-        tk.Frame(self.root, bg=_DIVIDER, height=1).pack(fill="x")
+        # Background pill — the only visible shape; everything else is text
+        _rrect(cv, 0, 0, _W, h, _R, fill=_PILL, outline=_EDGE, width=0.5)
 
-        # Container where workspace rows live
-        self.body = tk.Frame(self.root, bg=_BG)
-        self.body.pack(fill="both", expand=True)
+        # Header: ● workspace-name
+        cy  = _PILL_H // 2
+        cur = self._active()
+        cv.create_text(_PAD,      cy, anchor='w', text='●',
+                       fill=_DOT, font=_F_DOT)
+        cv.create_text(_PAD + 13, cy, anchor='w',
+                       text=cur.name if cur else '—',
+                       fill=_TXT_ON if cur else _TXT_OFF, font=_F_NAME)
 
-        # Drag bindings live only on the handle — never on rows or root
-        for w in (self.handle, self._handle_lbl):
-            w.bind("<Button-1>",  self._drag_start)
-            w.bind("<B1-Motion>", self._drag_move)
-            w.bind("<Button-2>",  self._menu)
-            w.bind("<Button-3>",  self._menu)
+        if not self._expanded or not self._workspaces:
+            return
 
-        # Context menu reachable from body and root as well
-        for w in (self.root, self.body):
-            w.bind("<Button-2>", self._menu)
-            w.bind("<Button-3>", self._menu)
+        # Separator
+        cv.create_line(_R+2, _PILL_H, _W-_R-2, _PILL_H,
+                       fill=_SEP, width=0.5)
 
-    # ── Drag ─────────────────────────────────────────────────────────────────
+        # Workspace rows
+        y = _PILL_H + 1
+        for ws in self._workspaces:
+            self._draw_row(ws, y)
+            y += _ITEM_H
 
-    def _drag_start(self, e: tk.Event) -> None:
-        self._drag_x = e.x_root - self.root.winfo_x()
-        self._drag_y = e.y_root - self.root.winfo_y()
+    def _draw_row(self, ws: Workspace, y: int) -> None:
+        cv   = self._cv
+        tag  = f'row::{ws.name}'
+        cy   = y + _ITEM_H // 2
+        live = ws.name == self._current_name
+        hot  = ws.name == self._hover_name
 
-    def _drag_move(self, e: tk.Event) -> None:
-        self.root.geometry(f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}")
+        if hot:
+            cv.create_rectangle(_R//2, y+1, _W-_R//2, y+_ITEM_H-1,
+                                 fill=_HOVER, outline='', tags=tag)
+        if live:
+            cv.create_text(_PAD, cy, anchor='w', text='✓',
+                           fill=_DOT, font=_F_CHECK, tags=tag)
+        cv.create_text(_PAD + 16, cy, anchor='w', text=ws.name,
+                       fill=_TXT_ON if live else _TXT_OFF,
+                       font=_F_LIST, tags=tag)
+
+        # Transparent full-row hit area — must be last so it sits on top
+        cv.create_rectangle(0, y, _W, y+_ITEM_H,
+                             fill='', outline='', tags=(tag, 'rows'))
+
+        cv.tag_bind(tag, '<Enter>',          lambda e, n=ws.name: self._row_enter(n))
+        cv.tag_bind(tag, '<Leave>',          lambda e, n=ws.name: self._row_leave(n))
+        # Use ButtonRelease so we can check self._dragged before acting
+        cv.tag_bind(tag, '<ButtonRelease-1>', lambda e, n=ws.name: self._row_click(n))
+
+    # ── Interaction ───────────────────────────────────────────────────────────
+
+    def _press(self, e: tk.Event) -> None:
+        self._px, self._py = e.x_root, e.y_root
+        self._ox = e.x_root - self.root.winfo_x()
+        self._oy = e.y_root - self.root.winfo_y()
+        self._dragged = False
+
+    def _drag(self, e: tk.Event) -> None:
+        if abs(e.x_root-self._px) > _DRAG_PX or abs(e.y_root-self._py) > _DRAG_PX:
+            self._dragged = True
+        if self._dragged:
+            self.root.geometry(f'+{e.x_root-self._ox}+{e.y_root-self._oy}')
+
+    def _release(self, e: tk.Event) -> None:
+        if self._eat_release:
+            self._eat_release = False
+            return
+        if self._dragged:
+            return
+        # Toggle only when releasing in the header zone
+        if e.y <= _PILL_H:
+            self._toggle()
+
+    def _row_enter(self, name: str) -> None:
+        if self._hover_name != name:
+            self._hover_name = name
+            self._redraw()
+
+    def _row_leave(self, name: str) -> None:
+        if self._hover_name == name:
+            self._hover_name = None
+            self._redraw()
+
+    def _row_click(self, name: str) -> None:
+        # tag_bind fires before the canvas-level binding; eat the upcoming
+        # canvas release so _release() doesn't also see it as a header tap.
+        self._eat_release = True
+        if not self._dragged:
+            ws = next((w for w in self._workspaces if w.name == name), None)
+            if ws:
+                self.detector.focus(ws)
+            self._current_name = name
+            self._close()
+
+    # ── Expand / collapse ─────────────────────────────────────────────────────
+
+    def _toggle(self) -> None:
+        self._close() if self._expanded else self._open()
+
+    def _open(self) -> None:
+        self._expanded   = True
+        self._hover_name = None
+        self._redraw()
+        self._sched_close()
+
+    def _close(self) -> None:
+        self._expanded   = False
+        self._hover_name = None
+        self._cancel_close()
+        self._redraw()
+
+    def _sched_close(self) -> None:
+        self._cancel_close()
+        self._close_job = self.root.after(_CLOSE_MS, self._close)
+
+    def _cancel_close(self) -> None:
+        if self._close_job:
+            self.root.after_cancel(self._close_job)
+            self._close_job = None
+
+    def _active(self) -> Optional[Workspace]:
+        if not self._workspaces:
+            return None
+        if self._current_name:
+            match = next((w for w in self._workspaces if w.name == self._current_name), None)
+            if match:
+                return match
+        return self._workspaces[0]
 
     # ── Context menu ─────────────────────────────────────────────────────────
 
-    def _menu(self, e: tk.Event) -> None:
-        m = tk.Menu(
-            self.root, tearoff=0,
-            bg="#1a1a1a", fg="#c0c0c0",
-            activebackground="#2a2a2a", activeforeground="#f0f0f0",
-            font=("SF Pro Text", 11), bd=0,
-        )
-        sub = tk.Menu(m, tearoff=0, bg="#1a1a1a", fg="#c0c0c0",
-                      activebackground="#2a2a2a", activeforeground="#f0f0f0")
+    def _ctx_menu(self, e: tk.Event) -> None:
+        m = tk.Menu(self.root, tearoff=0,
+                    bg='#1a1a1a', fg='#c0c0c0',
+                    activebackground='#2a2a2a', activeforeground='#f0f0f0',
+                    font=('SF Pro Text', 11), bd=0)
+        sub = tk.Menu(m, tearoff=0, bg='#1a1a1a', fg='#c0c0c0',
+                      activebackground='#2a2a2a', activeforeground='#f0f0f0')
         for pct in [100, 90, 75, 50]:
-            sub.add_command(
-                label=f"{pct}%",
-                command=lambda p=pct: self.root.wm_attributes("-alpha", p / 100),
-            )
-        m.add_cascade(label="Opacity", menu=sub)
+            sub.add_command(label=f'{pct}%',
+                            command=lambda p=pct: self.root.wm_attributes('-alpha', p/100))
+        m.add_cascade(label='Opacity', menu=sub)
         m.add_separator()
-        m.add_command(label="Quit", command=self._quit)
+        m.add_command(label='Quit', command=self._quit)
         m.tk_popup(e.x_root, e.y_root)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
@@ -157,92 +311,20 @@ class HUD:
     def _poll(self) -> None:
         workspaces = self.detector.detect()
         self._logger.update(workspaces)
-        self._refresh(workspaces)
+
+        prev = [ws.name for ws in self._workspaces]
+        nxt  = [ws.name for ws in workspaces]
+        self._workspaces = workspaces
+
+        # Keep _current_name pointing at a workspace that still exists
+        if self._current_name not in {ws.name for ws in workspaces}:
+            self._current_name = workspaces[0].name if workspaces else None
+
+        if prev != nxt:
+            self._redraw()
+
         self.root.after(self.poll_ms, self._poll)
 
     def _quit(self) -> None:
         self._logger.shutdown()
         self.root.destroy()
-
-    # ── Refresh ───────────────────────────────────────────────────────────────
-
-    def _refresh(self, workspaces: list[Workspace]) -> None:
-        for w in self._row_widgets:
-            w.destroy()
-        self._row_widgets.clear()
-
-        if workspaces:
-            for ws in workspaces:
-                row = self._workspace_row(ws)
-                row.pack(fill="x")
-                self._row_widgets.append(row)
-        else:
-            idle = self._idle_row()
-            idle.pack(fill="x")
-            self._row_widgets.append(idle)
-
-        self._set_geometry(n=max(len(workspaces), 1))
-
-    # ── Row builders ──────────────────────────────────────────────────────────
-
-    def _workspace_row(self, ws: Workspace) -> tk.Frame:
-        name_font = tkfont.Font(family="SF Pro Display", size=13, weight="normal")
-        path_font = tkfont.Font(family="SF Pro Mono",    size=10, weight="normal")
-
-        row = tk.Frame(self.body, bg=_BG, height=_ROW_H, cursor="hand2")
-        row.pack_propagate(False)
-
-        name_lbl = tk.Label(
-            row, text=ws.name,
-            font=name_font, fg=_FG_NAME, bg=_BG,
-            anchor="w",
-        )
-        name_lbl.place(x=14, y=8)
-
-        # Path label — rendered invisible (fg = bg) until hover
-        path_lbl = tk.Label(
-            row, text=ws.display_path,
-            font=path_font, fg=_BG, bg=_BG,   # invisible by default
-            anchor="w",
-        )
-        path_lbl.place(x=14, y=26)
-
-        # ── Hover + click ────────────────────────────────────────────────────
-        all_w = [row, name_lbl, path_lbl]
-
-        def enter(_e):
-            row.config(bg=_BG_HOV)
-            name_lbl.config(fg=_FG_NAME_HOV, bg=_BG_HOV)
-            path_lbl.config(fg=_FG_PATH_HOV, bg=_BG_HOV)
-
-        def leave(_e):
-            row.config(bg=_BG)
-            name_lbl.config(fg=_FG_NAME, bg=_BG)
-            path_lbl.config(fg=_BG, bg=_BG)
-
-        def click(_e):
-            self.detector.focus(ws)
-
-        for w in all_w:
-            w.bind("<Enter>",    enter)
-            w.bind("<Leave>",    leave)
-            w.bind("<Button-1>", click)
-            w.bind("<Button-2>", self._menu)
-            w.bind("<Button-3>", self._menu)
-
-        return row
-
-    def _idle_row(self) -> tk.Frame:
-        font = tkfont.Font(family="SF Pro Text", size=11, weight="normal")
-        row = tk.Frame(self.body, bg=_BG, height=_ROW_H)
-        row.pack_propagate(False)
-
-        tk.Label(
-            row, text="—",
-            font=font, fg=_FG_IDLE, bg=_BG, anchor="w",
-        ).place(x=14, y=13)
-
-        row.bind("<Button-2>", self._menu)
-        row.bind("<Button-3>", self._menu)
-
-        return row
