@@ -1,70 +1,91 @@
 """
 hud.py — Ambient workspace indicator.
 
-Two states:
-  Collapsed (default) — a 30px pill showing ● current workspace.
-                        The entire pill is a drag target. Nothing is clickable.
-  Expanded (on click) — pill grows into a compact switcher list.
-                        Click a row to focus that terminal and collapse.
-                        Auto-collapses after 4 seconds.
+Collapsed (default)
+  28px pill: ● workspace-name.
+  Entire surface is a drag target. Nothing is accidentally clickable.
 
-Drag vs click is disambiguated by a movement threshold: press + move > 4px
-is a drag; press + release in place is a click (toggle expand).
+Expanded (on click within header zone)
+  Pill grows downward into a compact switcher list.
+  Click a row → focus terminal → animate back to pill.
+  Auto-collapses after 4 s of inactivity.
+
+Animation
+  Height interpolation over ~120 ms (8 frames × 15 ms, cubic ease-out).
+  Expanding: items revealed progressively as pill grows downward.
+  Collapsing: items hidden progressively as pill shrinks upward.
+
+Drag vs click
+  Movement > 4 px before release = drag; moves window.
+  Press + release in place within header zone = click; toggles expand.
+  Row tag_bind fires before the canvas-level binding; _eat_release
+  prevents the canvas handler from also seeing the same release event.
 """
 
 import sys
 import tkinter as tk
-from typing import Optional
+from typing import Callable, Optional
 
 from detector import Workspace
 from logger import WorkspaceLogger
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-_TRANSP    = 'black'    # mapped to true transparency on macOS via -transparent
-_PILL      = '#1c1c1e'  # pill surface (macOS dark systemBackground)
-_EDGE      = '#3a3a3c'  # 1px subtle outline
-_SEP       = '#38383a'  # divider between header and list
-_DOT       = '#32d74b'  # active dot + checkmark (system green)
-_TXT_ON    = '#f2f2f7'  # current workspace name
-_TXT_OFF   = '#8e8e93'  # inactive workspace names
-_HOVER     = '#2c2c2e'  # row hover fill
+_TRANSP  = 'black'    # maps to true alpha-0 transparency on macOS
+_PILL    = '#2d2d2d'  # surface — lighter than near-black, lets translucency read
+_SEP     = '#484848'  # 0.5px separator between header and list
+_DOT     = '#32d74b'  # active indicator + checkmark (system green)
+_TXT_ON  = '#e8e8e8'  # current workspace name
+_TXT_OFF = '#8e8e93'  # inactive workspace names
+_HOVER   = '#3a3a3a'  # item hover fill
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
-_W      = 160   # pill width
-_PILL_H = 30    # collapsed height
-_ITEM_H = 30    # expanded row height
-_R      = 12    # corner radius
-_PAD    = 12    # left padding for all text
+_W      = 150   # pill width
+_PILL_H = 28    # collapsed height — r=14 gives a true pill (semicircle ends)
+_ITEM_H = 28    # expanded row height
+_R      = 14    # corner radius
+_X_DOT  = 11    # x: ● indicator
+_X_HDR  = 23    # x: name in collapsed header
+_X_CK   = 11    # x: ✓ checkmark
+_X_ROW  = 24    # x: name in expanded rows
 
 # ── Behaviour ─────────────────────────────────────────────────────────────────
-_DRAG_PX  = 4     # movement threshold to distinguish drag from click
-_CLOSE_MS = 4000  # auto-collapse delay (ms)
+_DRAG_PX  = 4     # px movement threshold for drag vs click
+_CLOSE_MS = 4000  # auto-collapse after this many ms
+
+# ── Animation ─────────────────────────────────────────────────────────────────
+_ANIM_N  = 8     # frame count
+_ANIM_MS = 15    # ms per frame  →  ~120 ms total
 
 # ── Platform fonts ────────────────────────────────────────────────────────────
 if sys.platform == 'darwin':
-    _F_NAME  = ('SF Pro Display', 12)
-    _F_LIST  = ('SF Pro Text',    12)
-    _F_CHECK = ('SF Pro Text',    11)
-    _F_DOT   = ('SF Pro Display',  8)
+    _F_DOT  = ('SF Pro Display', 7)
+    _F_NAME = ('SF Pro Display', 12)
+    _F_ROW  = ('SF Pro Text',    12)
+    _F_CK   = ('SF Pro Text',    11)
 else:
-    _F_NAME  = ('Segoe UI', 11)
-    _F_LIST  = ('Segoe UI', 11)
-    _F_CHECK = ('Segoe UI', 10)
-    _F_DOT   = ('Segoe UI',  8)
+    _F_DOT  = ('Segoe UI',  7)
+    _F_NAME = ('Segoe UI', 11)
+    _F_ROW  = ('Segoe UI', 11)
+    _F_CK   = ('Segoe UI', 10)
 
 
-# ── Rounded-rectangle helper ──────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _rrect(cv: tk.Canvas, x1: int, y1: int, x2: int, y2: int, r: int, **kw):
-    """Smooth rounded rectangle via B-spline polygon."""
+def _ease_out(t: float) -> float:
+    """Cubic ease-out: fast start, decelerate to rest."""
+    return 1 - (1 - t) ** 3
+
+
+def _rrect(cv: tk.Canvas, x1: int, y1: int, x2: int, y2: int, r: int, **kw) -> None:
+    """Smooth rounded rectangle via B-spline polygon with smooth=True."""
     pts = [
-        x1+r, y1,   x2-r, y1,    # top
-        x2,   y1,   x2,   y1+r,  # top-right
-        x2,   y2-r, x2,   y2,    # right
-        x2-r, y2,   x1+r, y2,    # bottom
-        x1,   y2,   x1,   y2-r,  # bottom-left
-        x1,   y1+r, x1,   y1,    # left
+        x1+r, y1,    x2-r, y1,
+        x2,   y1,    x2,   y1+r,
+        x2,   y2-r,  x2,   y2,
+        x2-r, y2,    x1+r, y2,
+        x1,   y2,    x1,   y2-r,
+        x1,   y1+r,  x1,   y1,
     ]
     cv.create_polygon(pts, smooth=True, **kw)
 
@@ -77,21 +98,21 @@ class HUD:
         self.detector = detector
         self.poll_ms  = int(config.get('poll_interval', 2) * 1000)
         self.position = config.get('position', 'bottom-right')
-        self._opacity = float(config.get('opacity', 0.88))
+        self._opacity = float(config.get('opacity', 0.82))
         self._logger  = WorkspaceLogger()
 
-        # Display state
-        self._expanded: bool             = False
+        self._expanded: bool              = False
         self._current_name: Optional[str] = None
         self._workspaces: list[Workspace] = []
         self._hover_name: Optional[str]   = None
         self._close_job                   = None
+        self._anim_job                    = None
+        self._animating: bool             = False
+        self._eat_release: bool           = False
 
-        # Drag state
-        self._px = self._py = 0
-        self._ox = self._oy = 0
-        self._dragged = False
-        self._eat_release = False  # absorbs canvas release after a row click
+        self._px = self._py = 0    # press position (for drag detection)
+        self._ox = self._oy = 0    # window offset at press time
+        self._dragged: bool = False
 
         self._init_window()
         self._init_canvas()
@@ -103,8 +124,9 @@ class HUD:
         self.root.overrideredirect(True)
         self.root.wm_attributes('-topmost', True)
         self.root.wm_attributes('-alpha', self._opacity)
-        # True per-pixel transparency on macOS: pixels painted with bg colour
-        # are fully composited against the desktop, not the window surface.
+        # On macOS, -transparent makes pixels painted with the configured bg
+        # colour fully transparent in the compositor.  Other pixels (the pill)
+        # render at the -alpha level, creating genuine translucency.
         try:
             self.root.wm_attributes('-transparent', True)
             self.root.configure(bg=_TRANSP)
@@ -112,30 +134,31 @@ class HUD:
         except tk.TclError:
             self.root.configure(bg=_PILL)
             self._transp = False
-        self._refit()
+        self._set_geometry(_PILL_H)
 
-    def _height(self) -> int:
+    def _full_h(self) -> int:
+        """Target height when expanded (or collapsed if not expanded)."""
         if not self._expanded or not self._workspaces:
             return _PILL_H
         return _PILL_H + 1 + len(self._workspaces) * _ITEM_H + 4
 
-    def _refit(self) -> None:
-        h = self._height()
+    def _set_geometry(self, h: int) -> None:
+        """Set window height to h, preserving current x/y position."""
         try:
             x, y = self.root.winfo_x(), self.root.winfo_y()
             if x == 0 and y == 0:
                 raise ValueError
         except Exception:
-            x, y = self._initial_xy(h)
+            x, y = self._default_xy(h)
         self.root.geometry(f'{_W}x{h}+{x}+{y}')
 
-    def _initial_xy(self, h: int) -> tuple[int, int]:
+    def _default_xy(self, h: int) -> tuple[int, int]:
         sw, sh, m = self.root.winfo_screenwidth(), self.root.winfo_screenheight(), 16
         return {
-            'top-left':     (m,       40),
-            'top-right':    (sw-_W-m, 40),
-            'bottom-left':  (m,       sh-h-40),
-            'bottom-right': (sw-_W-m, sh-h-40),
+            'top-left':     (m,        40),
+            'top-right':    (sw-_W-m,  40),
+            'bottom-left':  (m,        sh-h-40),
+            'bottom-right': (sw-_W-m,  sh-h-40),
         }.get(self.position, (sw-_W-m, sh-h-40))
 
     # ── Canvas ────────────────────────────────────────────────────────────────
@@ -152,36 +175,47 @@ class HUD:
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 
-    def _redraw(self) -> None:
-        self._refit()
+    def _redraw(self, anim_h: Optional[int] = None) -> None:
+        """
+        Redraw the canvas.
+        anim_h=None  → full target height (settled state).
+        anim_h=n     → animation frame at intermediate height n; only draw
+                        items whose top edge falls within n so they appear
+                        progressively as the pill expands.
+        """
+        h = anim_h if anim_h is not None else self._full_h()
+        self._set_geometry(h)
+
         cv = self._cv
         cv.delete('all')
-        h = self._height()
 
-        # Background pill — the only visible shape; everything else is text
-        _rrect(cv, 0, 0, _W, h, _R, fill=_PILL, outline=_EDGE, width=0.5)
+        # Background pill at current height — no visible border, shape alone defines it
+        _rrect(cv, 0, 0, _W, h, _R, fill=_PILL, outline='', width=0)
 
-        # Header: ● workspace-name
+        # Header: ● workspace-name (always visible)
         cy  = _PILL_H // 2
         cur = self._active()
-        cv.create_text(_PAD,      cy, anchor='w', text='●',
-                       fill=_DOT, font=_F_DOT)
-        cv.create_text(_PAD + 13, cy, anchor='w',
+        cv.create_text(_X_DOT, cy, anchor='w',
+                       text='●', fill=_DOT, font=_F_DOT)
+        cv.create_text(_X_HDR, cy, anchor='w',
                        text=cur.name if cur else '—',
                        fill=_TXT_ON if cur else _TXT_OFF, font=_F_NAME)
 
         if not self._expanded or not self._workspaces:
             return
 
-        # Separator
-        cv.create_line(_R+2, _PILL_H, _W-_R-2, _PILL_H,
-                       fill=_SEP, width=0.5)
+        # Separator — only once the pill has grown past the header
+        if anim_h is None or anim_h > _PILL_H + 2:
+            cv.create_line(_R+2, _PILL_H, _W-_R-2, _PILL_H,
+                           fill=_SEP, width=0.5)
 
-        # Workspace rows
-        y = _PILL_H + 1
+        # Rows — draw only those whose top edge fits within the current height
+        iy = _PILL_H + 1
         for ws in self._workspaces:
-            self._draw_row(ws, y)
-            y += _ITEM_H
+            if anim_h is not None and iy >= anim_h:
+                break
+            self._draw_row(ws, iy)
+            iy += _ITEM_H
 
     def _draw_row(self, ws: Workspace, y: int) -> None:
         cv   = self._cv
@@ -191,23 +225,94 @@ class HUD:
         hot  = ws.name == self._hover_name
 
         if hot:
-            cv.create_rectangle(_R//2, y+1, _W-_R//2, y+_ITEM_H-1,
-                                 fill=_HOVER, outline='', tags=tag)
+            cv.create_rectangle(
+                _R//2, y+1, _W-_R//2, y+_ITEM_H-1,
+                fill=_HOVER, outline='', tags=tag,
+            )
         if live:
-            cv.create_text(_PAD, cy, anchor='w', text='✓',
-                           fill=_DOT, font=_F_CHECK, tags=tag)
-        cv.create_text(_PAD + 16, cy, anchor='w', text=ws.name,
+            cv.create_text(_X_CK, cy, anchor='w',
+                           text='✓', fill=_DOT, font=_F_CK, tags=tag)
+        cv.create_text(_X_ROW, cy, anchor='w',
+                       text=ws.name,
                        fill=_TXT_ON if live else _TXT_OFF,
-                       font=_F_LIST, tags=tag)
+                       font=_F_ROW, tags=tag)
 
-        # Transparent full-row hit area — must be last so it sits on top
+        # Full-row transparent hit area — placed last so it sits on top
         cv.create_rectangle(0, y, _W, y+_ITEM_H,
                              fill='', outline='', tags=(tag, 'rows'))
 
-        cv.tag_bind(tag, '<Enter>',          lambda e, n=ws.name: self._row_enter(n))
-        cv.tag_bind(tag, '<Leave>',          lambda e, n=ws.name: self._row_leave(n))
-        # Use ButtonRelease so we can check self._dragged before acting
-        cv.tag_bind(tag, '<ButtonRelease-1>', lambda e, n=ws.name: self._row_click(n))
+        cv.tag_bind(tag, '<Enter>',
+                    lambda e, n=ws.name: self._row_enter(n))
+        cv.tag_bind(tag, '<Leave>',
+                    lambda e, n=ws.name: self._row_leave(n))
+        # ButtonRelease (not Button-1) so _dragged is known before we act
+        cv.tag_bind(tag, '<ButtonRelease-1>',
+                    lambda e, n=ws.name: self._row_click(n))
+
+    # ── Animation ─────────────────────────────────────────────────────────────
+
+    def _animate(self, from_h: int, to_h: int,
+                  step: int = 0, on_done: Optional[Callable] = None) -> None:
+        self._animating = True
+
+        if step > _ANIM_N:
+            self._animating = False
+            if on_done:
+                on_done()       # caller draws final settled state
+            else:
+                self._redraw()  # expand: draw full content at target height
+            return
+
+        t = _ease_out(step / _ANIM_N)
+        h = int(from_h + t * (to_h - from_h))
+        self._redraw(anim_h=h)
+
+        self._anim_job = self.root.after(
+            _ANIM_MS,
+            lambda: self._animate(from_h, to_h, step + 1, on_done),
+        )
+
+    def _cancel_anim(self) -> None:
+        if self._anim_job:
+            self.root.after_cancel(self._anim_job)
+            self._anim_job = None
+        self._animating = False
+
+    # ── Expand / collapse ─────────────────────────────────────────────────────
+
+    def _toggle(self) -> None:
+        self._close() if self._expanded else self._open()
+
+    def _open(self) -> None:
+        self._cancel_anim()
+        self._expanded   = True
+        self._hover_name = None
+        target = self._full_h()
+        # Animate from pill height up to expanded height.
+        # Step 0 draws at _PILL_H (header only), subsequent steps reveal items.
+        self._animate(_PILL_H, target)
+        self._sched_close()
+
+    def _close(self) -> None:
+        self._cancel_anim()
+        self._cancel_close()
+        start = self.root.winfo_height()
+
+        def _finish() -> None:
+            self._expanded   = False
+            self._hover_name = None
+            self._redraw()  # _expanded now False → draws at _PILL_H
+
+        self._animate(start, _PILL_H, on_done=_finish)
+
+    def _sched_close(self) -> None:
+        self._cancel_close()
+        self._close_job = self.root.after(_CLOSE_MS, self._close)
+
+    def _cancel_close(self) -> None:
+        if self._close_job:
+            self.root.after_cancel(self._close_job)
+            self._close_job = None
 
     # ── Interaction ───────────────────────────────────────────────────────────
 
@@ -229,22 +334,22 @@ class HUD:
             return
         if self._dragged:
             return
-        # Toggle only when releasing in the header zone
+        # Only toggle when releasing within the header strip
         if e.y <= _PILL_H:
             self._toggle()
 
     def _row_enter(self, name: str) -> None:
-        if self._hover_name != name:
+        if self._hover_name != name and not self._animating:
             self._hover_name = name
             self._redraw()
 
     def _row_leave(self, name: str) -> None:
-        if self._hover_name == name:
+        if self._hover_name == name and not self._animating:
             self._hover_name = None
             self._redraw()
 
     def _row_click(self, name: str) -> None:
-        # tag_bind fires before the canvas-level binding; eat the upcoming
+        # tag_bind fires before canvas-level binding; flag absorbs the
         # canvas release so _release() doesn't also see it as a header tap.
         self._eat_release = True
         if not self._dragged:
@@ -254,39 +359,13 @@ class HUD:
             self._current_name = name
             self._close()
 
-    # ── Expand / collapse ─────────────────────────────────────────────────────
-
-    def _toggle(self) -> None:
-        self._close() if self._expanded else self._open()
-
-    def _open(self) -> None:
-        self._expanded   = True
-        self._hover_name = None
-        self._redraw()
-        self._sched_close()
-
-    def _close(self) -> None:
-        self._expanded   = False
-        self._hover_name = None
-        self._cancel_close()
-        self._redraw()
-
-    def _sched_close(self) -> None:
-        self._cancel_close()
-        self._close_job = self.root.after(_CLOSE_MS, self._close)
-
-    def _cancel_close(self) -> None:
-        if self._close_job:
-            self.root.after_cancel(self._close_job)
-            self._close_job = None
-
     def _active(self) -> Optional[Workspace]:
         if not self._workspaces:
             return None
         if self._current_name:
-            match = next((w for w in self._workspaces if w.name == self._current_name), None)
-            if match:
-                return match
+            m = next((w for w in self._workspaces if w.name == self._current_name), None)
+            if m:
+                return m
         return self._workspaces[0]
 
     # ── Context menu ─────────────────────────────────────────────────────────
@@ -298,7 +377,7 @@ class HUD:
                     font=('SF Pro Text', 11), bd=0)
         sub = tk.Menu(m, tearoff=0, bg='#1a1a1a', fg='#c0c0c0',
                       activebackground='#2a2a2a', activeforeground='#f0f0f0')
-        for pct in [100, 90, 75, 50]:
+        for pct in [100, 90, 82, 72, 60]:
             sub.add_command(label=f'{pct}%',
                             command=lambda p=pct: self.root.wm_attributes('-alpha', p/100))
         m.add_cascade(label='Opacity', menu=sub)
@@ -320,7 +399,8 @@ class HUD:
         if self._current_name not in {ws.name for ws in workspaces}:
             self._current_name = workspaces[0].name if workspaces else None
 
-        if prev != nxt:
+        # Redraw on change, but never interrupt an in-progress animation
+        if prev != nxt and not self._animating:
             self._redraw()
 
         self.root.after(self.poll_ms, self._poll)
