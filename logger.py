@@ -223,11 +223,13 @@ class HintStore:
 
     def __init__(self, path: str = _HINTS_PATH) -> None:
         self._path  = path
+        self._mtime: float = 0.0
         self._hints: dict[str, dict] = self._load()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get(self, name: str) -> Optional[str]:
+        self._maybe_reload()
         entry = self._hints.get(name)
         return entry["hint"] if isinstance(entry, dict) else None
 
@@ -255,6 +257,7 @@ class HintStore:
         Returns the currently stored hint (None when on main/master with no
         prior hint; the ↳ line is omitted in that case).
         """
+        self._maybe_reload()
         entry = self._hints.get(ws.name)
         if isinstance(entry, dict) and entry.get("manual"):
             return entry["hint"]
@@ -273,6 +276,16 @@ class HintStore:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    def _maybe_reload(self) -> None:
+        """Reload from disk if hints.json has been modified since last read."""
+        try:
+            mtime = os.path.getmtime(self._path)
+            if mtime != self._mtime:
+                self._hints = self._load()
+                self._mtime = mtime
+        except OSError:
+            pass
+
     def _set_auto(self, name: str, hint: str) -> None:
         entry = self._hints.get(name)
         if isinstance(entry, dict) and entry.get("hint") == hint:
@@ -282,6 +295,7 @@ class HintStore:
 
     def _load(self) -> dict[str, dict]:
         try:
+            self._mtime = os.path.getmtime(self._path)
             with open(self._path) as fh:
                 data = json.load(fh)
             if not isinstance(data, dict):

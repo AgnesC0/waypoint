@@ -39,7 +39,7 @@ _SEP      = '#484848'  # separator between header and list
 _DOT      = '#32d74b'  # active dot + checkmark (system green)
 _TXT_ON   = '#e8e8e8'  # active workspace name
 _TXT_OFF  = '#8e8e93'  # inactive workspace names
-_TXT_HINT = '#6e6e73'  # resume hint — visually subordinate
+_TXT_HINT = '#8e8e93'  # resume hint — subordinate but readable at 10pt
 _HOVER    = '#3a3a3a'  # row hover fill
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
