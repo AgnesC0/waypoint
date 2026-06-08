@@ -1,26 +1,13 @@
 """
-hud.py — Context restoration HUD.
+hud.py — Context Memory HUD.
 
-Always-visible panel showing all tracked workspaces at a glance.
+Answers three questions at a glance:
+  1. Where am I now?       — header: active workspace name + session duration
+  2. What was I doing?     — each row: resume hint
+  3. How long since I was there? — each row: relative recency
 
-Header
-  Active workspace name + session duration.
-  Example: ● Waypoint · 42m
-
-Body
-  Every tracked workspace with its resume hint.
-  Example:
-    ✓ Waypoint
-      ↳ terminal detection
-      CogPass Light
-      ↳ execution cost
-      SalzLab
-      ↳ RSA analysis
-
-Interaction
-  Drag the panel to reposition.
-  Click any workspace row to focus that terminal.
-  Right-click for opacity / quit.
+All configured workspaces are shown in fixed config.yaml order so spatial
+memory stays stable. Open workspaces (active terminal) are clickable.
 """
 
 import sys
@@ -29,50 +16,51 @@ import tkinter as tk
 from typing import Optional
 
 from detector import Workspace
-from logger import WorkspaceLogger, HintStore
+from logger import WorkspaceLogger, HintStore, LastSeenStore
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-_TRANSP   = 'black'    # compositor key-colour → alpha-0 on macOS
-_PILL     = '#2d2d2d'  # panel surface
-_SEP      = '#484848'  # separator between header and list
-_DOT      = '#32d74b'  # active dot + checkmark (system green)
-_TXT_ON   = '#e8e8e8'  # active workspace name
-_TXT_OFF  = '#8e8e93'  # inactive workspace names
-_TXT_HINT = '#8e8e93'  # resume hint — subordinate but readable at 10pt
-_HOVER    = '#3a3a3a'  # row hover fill
+_TRANSP   = 'black'
+_PILL     = '#2d2d2d'
+_SEP      = '#484848'
+_DOT      = '#32d74b'
+_TXT_ON   = '#e8e8e8'   # active workspace name
+_TXT_OFF  = '#8e8e93'   # inactive workspace names + hints
+_TXT_META = '#6e6e73'   # recency — most subtle
+_HOVER    = '#3a3a3a'
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
-_W        = 180   # panel width
-_HEADER_H = 36    # header row height
-_ITEM_H   = 42    # height per workspace row (name + hint)
-_PAD_B    = 6     # bottom padding inside panel
-_R        = 14    # corner radius
-_X_DOT    = 11    # x: ● in header
-_X_HDR    = 23    # x: text in header
-_X_CK     = 11    # x: ✓ checkmark in list
-_X_NAME   = 23    # x: workspace name in list
-_X_HINT   = 29    # x: ↳ hint (indented)
+_W        = 180
+_HEADER_H = 36
+_ITEM_H   = 50    # name + hint + recency: three lines per workspace
+_PAD_B    = 6
+_R        = 14
+_X_DOT    = 11
+_X_HDR    = 23
+_X_CK     = 11
+_X_NAME   = 23
+_X_HINT   = 29    # hint and recency lines are indented
 
 # y offsets within each workspace row
-_Y_NAME_WITH_HINT = 13   # name center when a hint is present
-_Y_HINT_ROW       = 28   # hint center
+_Y_ITEM_NAME = 13
+_Y_ITEM_HINT = 27
+_Y_ITEM_META = 40
 
 # ── Behaviour ─────────────────────────────────────────────────────────────────
-_DRAG_PX = 4   # px movement before a press becomes a drag
+_DRAG_PX = 4
 
 # ── Platform fonts ────────────────────────────────────────────────────────────
 if sys.platform == 'darwin':
     _F_DOT  = ('SF Pro Display', 7)
     _F_NAME = ('SF Pro Display', 12)
-    _F_HINT = ('SF Pro Text',    10)
     _F_ROW  = ('SF Pro Text',    12)
+    _F_HINT = ('SF Pro Text',    10)
     _F_CK   = ('SF Pro Text',    11)
 else:
     _F_DOT  = ('Segoe UI',  7)
     _F_NAME = ('Segoe UI', 11)
-    _F_HINT = ('Segoe UI',  9)
     _F_ROW  = ('Segoe UI', 11)
+    _F_HINT = ('Segoe UI',  9)
     _F_CK   = ('Segoe UI', 10)
 
 
@@ -100,23 +88,45 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}h {rem}m" if rem else f"{h}h"
 
 
+def _fmt_recency(ts: Optional[float], is_active: bool) -> str:
+    if is_active:
+        return "active now"
+    if ts is None:
+        return ""
+    delta = time.time() - ts
+    m = int(delta // 60)
+    if m < 1:
+        return "< 1m ago"
+    if m < 60:
+        return f"{m}m ago"
+    h = int(delta // 3600)
+    if h < 24:
+        return f"{h}h ago"
+    d = int(delta // 86400)
+    return "yesterday" if d == 1 else f"{d}d ago"
+
+
 # ── HUD ───────────────────────────────────────────────────────────────────────
 
 class HUD:
     def __init__(self, root: tk.Tk, config: dict, detector) -> None:
-        self.root     = root
-        self.detector = detector
-        self.poll_ms  = int(config.get('poll_interval', 2) * 1000)
-        self.position = config.get('position', 'bottom-right')
-        self._opacity = float(config.get('opacity', 0.82))
-        self._logger  = WorkspaceLogger()
-        self._hints   = HintStore()
+        self.root        = root
+        self.detector    = detector
+        self.poll_ms     = int(config.get('poll_interval', 2) * 1000)
+        self.position    = config.get('position', 'bottom-right')
+        self._opacity    = float(config.get('opacity', 0.82))
+        self._logger     = WorkspaceLogger()
+        self._hints      = HintStore()
+        self._last_seen  = LastSeenStore()
 
-        self._current_name: Optional[str]    = None
+        # All projects in config order — drives the fixed display list
+        self._all_projects: list[dict] = config.get('projects', [])
+
+        self._current_name: Optional[str]     = None
         self._last_active_name: Optional[str] = None
-        self._context_since: float           = time.time()
-        self._workspaces: list[Workspace]    = []
-        self._hover_name: Optional[str]      = None
+        self._context_since: float            = time.time()
+        self._workspaces: list[Workspace]     = []
+        self._hover_name: Optional[str]       = None
 
         self._px = self._py = 0
         self._ox = self._oy = 0
@@ -142,7 +152,7 @@ class HUD:
         self._set_geometry(self._full_h())
 
     def _full_h(self) -> int:
-        n = len(self._workspaces)
+        n = len(self._all_projects)
         return _HEADER_H if n == 0 else _HEADER_H + 1 + n * _ITEM_H + _PAD_B
 
     def _set_geometry(self, h: int) -> None:
@@ -185,7 +195,7 @@ class HUD:
         cv.delete('all')
         _rrect(cv, 0, 0, _W, h, _R, fill=_PILL, outline='', width=0)
 
-        # Header: ● WorkspaceName · duration
+        # Header: ● ActiveWorkspace · duration
         cur = self._active()
         cy  = _HEADER_H // 2
         if cur:
@@ -199,27 +209,27 @@ class HUD:
                        text=header_text,
                        fill=_TXT_ON if cur else _TXT_OFF, font=_F_NAME)
 
-        if not self._workspaces:
+        if not self._all_projects:
             return
 
         cv.create_line(_R+2, _HEADER_H, _W-_R-2, _HEADER_H,
                        fill=_SEP, width=0.5)
 
+        open_ws = {ws.name: ws for ws in self._workspaces}
         iy = _HEADER_H + 1
-        for ws in self._workspaces:
-            self._draw_row(ws, iy)
+        for proj in self._all_projects:
+            name = proj['name']
+            self._draw_row(name, open_ws.get(name), iy)
             iy += _ITEM_H
 
-    def _draw_row(self, ws: Workspace, y: int) -> None:
+    def _draw_row(self, name: str, ws: Optional[Workspace], y: int) -> None:
         cv   = self._cv
-        tag  = f'row::{ws.name}'
-        live = ws.name == self._current_name
-        hot  = ws.name == self._hover_name
-        hint = self._hints.get(ws.name)
-
-        # Shift name up when a hint is present so both lines sit comfortably
-        name_cy = y + (_Y_NAME_WITH_HINT if hint else _ITEM_H // 2)
-        hint_cy = y + _Y_HINT_ROW
+        tag  = f'row::{name}'
+        live = name == self._current_name
+        hot  = name == self._hover_name
+        hint = self._hints.get(name)
+        ts   = self._last_seen.get(name)
+        recency = _fmt_recency(ts, live)
 
         if hot:
             cv.create_rectangle(
@@ -227,26 +237,31 @@ class HUD:
                 fill=_HOVER, outline='', tags=tag,
             )
         if live:
-            cv.create_text(_X_CK, name_cy, anchor='w',
+            cv.create_text(_X_CK, y + _Y_ITEM_NAME, anchor='w',
                            text='✓', fill=_DOT, font=_F_CK, tags=tag)
-        cv.create_text(_X_NAME, name_cy, anchor='w',
-                       text=ws.name,
+        cv.create_text(_X_NAME, y + _Y_ITEM_NAME, anchor='w',
+                       text=name,
                        fill=_TXT_ON if live else _TXT_OFF,
                        font=_F_ROW, tags=tag)
         if hint:
-            cv.create_text(_X_HINT, hint_cy, anchor='w',
+            cv.create_text(_X_HINT, y + _Y_ITEM_HINT, anchor='w',
                            text=f"↳ {hint}",
-                           fill=_TXT_HINT, font=_F_HINT, tags=tag)
+                           fill=_TXT_OFF, font=_F_HINT, tags=tag)
+        if recency:
+            cv.create_text(_X_HINT, y + _Y_ITEM_META, anchor='w',
+                           text=f"↳ {recency}",
+                           fill=_TXT_META, font=_F_HINT, tags=tag)
 
-        # Full-row transparent hit area on top for reliable click/hover
+        # Full-row hit area
         cv.create_rectangle(0, y, _W, y+_ITEM_H,
                             fill='', outline='', tags=(tag, 'rows'))
         cv.tag_bind(tag, '<Enter>',
-                    lambda e, n=ws.name: self._row_enter(n))
+                    lambda e, n=name: self._row_enter(n))
         cv.tag_bind(tag, '<Leave>',
-                    lambda e, n=ws.name: self._row_leave(n))
-        cv.tag_bind(tag, '<ButtonRelease-1>',
-                    lambda e, n=ws.name: self._row_click(n))
+                    lambda e, n=name: self._row_leave(n))
+        if ws is not None:
+            cv.tag_bind(tag, '<ButtonRelease-1>',
+                        lambda e, n=name: self._row_click(n))
 
     # ── Interaction ───────────────────────────────────────────────────────────
 
@@ -263,7 +278,7 @@ class HUD:
             self.root.geometry(f'+{e.x_root-self._ox}+{e.y_root-self._oy}')
 
     def _release(self, e: tk.Event) -> None:
-        pass  # rows handle their own clicks; drag is handled in _drag
+        pass
 
     def _row_enter(self, name: str) -> None:
         if self._hover_name != name:
@@ -319,7 +334,7 @@ class HUD:
         self._logger.update(workspaces)
         self._workspaces = workspaces
 
-        # Keep _current_name pointing at a workspace that still exists
+        # Keep _current_name pointing at an open workspace
         valid = {ws.name for ws in workspaces}
         if self._current_name not in valid:
             self._current_name = workspaces[0].name if workspaces else None
@@ -330,9 +345,10 @@ class HUD:
             self._context_since    = time.time()
             self._last_active_name = active.name
 
-        # Refresh hints for every visible workspace so the list stays current
+        # Update hints and last-seen for all currently open workspaces
         for ws in workspaces:
             self._hints.update_from_workspace(ws)
+            self._last_seen.touch(ws.name)
 
         self._redraw()
         self.root.after(self.poll_ms, self._poll)

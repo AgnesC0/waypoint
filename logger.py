@@ -318,3 +318,59 @@ class HintStore:
                 json.dump(self._hints, fh, indent=2)
         except OSError:
             pass
+
+
+_LAST_SEEN_PATH = os.path.join(_LOG_DIR, "last_seen.json")
+
+
+class LastSeenStore:
+    """
+    Tracks the last Unix timestamp each workspace was seen by the detector.
+    Persists to ~/.waypoint/last_seen.json so recency survives restarts.
+
+    touch() is called every poll for open workspaces; writes to disk at most
+    once per minute per workspace to keep I/O minimal.
+    """
+
+    def __init__(self, path: str = _LAST_SEEN_PATH) -> None:
+        self._path  = path
+        self._mtime: float = 0.0
+        self._data: dict[str, float] = self._load()
+
+    def touch(self, name: str) -> None:
+        """Record that this workspace was just seen; persist if minute rolled over."""
+        now  = time.time()
+        prev = self._data.get(name, 0.0)
+        self._data[name] = now
+        if int(now // 60) != int(prev // 60):
+            self._persist()
+
+    def get(self, name: str) -> Optional[float]:
+        self._maybe_reload()
+        return self._data.get(name)
+
+    def _maybe_reload(self) -> None:
+        try:
+            mtime = os.path.getmtime(self._path)
+            if mtime != self._mtime:
+                self._data  = self._load()
+                self._mtime = mtime
+        except OSError:
+            pass
+
+    def _load(self) -> dict[str, float]:
+        try:
+            self._mtime = os.path.getmtime(self._path)
+            with open(self._path) as fh:
+                data = json.load(fh)
+            return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _persist(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            with open(self._path, "w") as fh:
+                json.dump(self._data, fh, indent=2)
+        except OSError:
+            pass
