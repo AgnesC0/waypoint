@@ -33,6 +33,9 @@ _SKIP_BRANCHES = {
     "staging", "production", "release", "hotfix", "feature",
 }
 
+# Branch prefixes that scope a task name (e.g. "feature/terminal-detection")
+_SKIP_PREFIXES = {"feature", "fix", "bugfix", "feat", "chore", "refactor", "hotfix", "release"}
+
 # Tokens too generic to use as a keyword
 _SKIP_TOKENS = {"app", "web", "api", "lib", "src", "new", "old", "test", "light", "dark"}
 
@@ -77,82 +80,77 @@ class WorkspaceLogger:
     # ── Event emitters ────────────────────────────────────────────────────────
 
     def _emit_start(self, ws: Workspace, now: float) -> None:
-        task_keyword, confidence = self._infer_task(ws)
+        context = self._infer_task(ws)
         self._sessions[ws.name] = {
-            "start_time":   now,
-            "ws":           ws,
-            "task_keyword": task_keyword,
-            "confidence":   confidence,
+            "start_time": now,
+            "ws":         ws,
+            "context":    context,
         }
         self._write({
-            "event_type":        "workspace_start",
-            "timestamp":         now,
-            "start_time":        now,
-            "end_time":          None,
-            "duration_seconds":  None,
-            "workspace":         ws.name,
-            "cwd":               ws.cwd,
-            "tty":               ws.tty,
-            "window_id":         ws.window_id,
-            "tab_id":            ws.tab_index,
+            "event_type":         "workspace_start",
+            "timestamp":          now,
+            "start_time":         now,
+            "end_time":           None,
+            "duration_seconds":   None,
+            "workspace":          ws.name,
+            "context":            context,
+            "cwd":                ws.cwd,
+            "tty":                ws.tty,
+            "window_id":          ws.window_id,
+            "tab_id":             ws.tab_index,
             "previous_workspace": None,
-            "current_workspace": ws.name,
-            "end_reason":        None,
-            "task_keyword":      task_keyword,
-            "confidence":        confidence,
+            "current_workspace":  ws.name,
+            "end_reason":         None,
         })
 
     def _emit_end(self, name: str, end_reason: str, now: float) -> None:
         session = self._sessions.pop(name)
         ws = session["ws"]
         self._write({
-            "event_type":        "workspace_end",
-            "timestamp":         now,
-            "start_time":        session["start_time"],
-            "end_time":          now,
-            "duration_seconds":  round(now - session["start_time"], 2),
-            "workspace":         name,
-            "cwd":               ws.cwd,
-            "tty":               ws.tty,
-            "window_id":         ws.window_id,
-            "tab_id":            ws.tab_index,
+            "event_type":         "workspace_end",
+            "timestamp":          now,
+            "start_time":         session["start_time"],
+            "end_time":           now,
+            "duration_seconds":   round(now - session["start_time"], 2),
+            "workspace":          name,
+            "context":            session["context"],
+            "cwd":                ws.cwd,
+            "tty":                ws.tty,
+            "window_id":          ws.window_id,
+            "tab_id":             ws.tab_index,
             "previous_workspace": name,
-            "current_workspace": None,
-            "end_reason":        end_reason,
-            "task_keyword":      session["task_keyword"],
-            "confidence":        session["confidence"],
+            "current_workspace":  None,
+            "end_reason":         end_reason,
         })
 
     def _emit_switch(
         self, ended_name: str, started_name: str, current: dict, now: float
     ) -> None:
-        session = self._sessions.pop(ended_name)
-        new_ws  = current[started_name]
-        task_keyword, confidence = self._infer_task(new_ws)
+        session  = self._sessions.pop(ended_name)
+        new_ws   = current[started_name]
+        context  = self._infer_task(new_ws)
 
         self._write({
-            "event_type":        "workspace_switch",
-            "timestamp":         now,
-            "start_time":        session["start_time"],
-            "end_time":          now,
-            "duration_seconds":  round(now - session["start_time"], 2),
-            "workspace":         ended_name,
-            "cwd":               session["ws"].cwd,
-            "tty":               session["ws"].tty,
-            "window_id":         session["ws"].window_id,
-            "tab_id":            session["ws"].tab_index,
+            "event_type":         "workspace_switch",
+            "timestamp":          now,
+            "start_time":         session["start_time"],
+            "end_time":           now,
+            "duration_seconds":   round(now - session["start_time"], 2),
+            "workspace":          ended_name,
+            "context":            session["context"],
+            "cwd":                session["ws"].cwd,
+            "tty":                session["ws"].tty,
+            "window_id":          session["ws"].window_id,
+            "tab_id":             session["ws"].tab_index,
             "previous_workspace": ended_name,
-            "current_workspace": started_name,
-            "end_reason":        "switch_workspace",
-            "task_keyword":      session["task_keyword"],
-            "confidence":        session["confidence"],
+            "current_workspace":  started_name,
+            "end_reason":         "switch_workspace",
         })
 
         self._sessions[started_name] = {
-            "start_time":   now,
-            "ws":           new_ws,
-            "task_keyword": task_keyword,
-            "confidence":   confidence,
+            "start_time": now,
+            "ws":         new_ws,
+            "context":    context,
         }
 
     # ── JSONL writer ─────────────────────────────────────────────────────────
@@ -166,46 +164,103 @@ class WorkspaceLogger:
 
     # ── Task inference ────────────────────────────────────────────────────────
 
-    def _infer_task(self, ws: Workspace) -> tuple[str, float]:
-        """
-        Infer a task keyword conservatively from three sources, in order:
-          1. git branch  — strongest signal; user-chosen, task-specific
-          2. folder name — moderate signal; reflects project intent
-          3. display name — weakest; last resort
-        Returns ("", 0.0) when no meaningful keyword can be extracted.
-        """
-        branch = self._git_branch(ws.path)
+    def _infer_task(self, ws: Workspace) -> str:
+        return infer_context(ws)
+
+
+# ── Module-level helpers ──────────────────────────────────────────────────────
+
+def _git_branch(path: str) -> str:
+    try:
+        r = subprocess.run(
+            ["git", "-C", path, "branch", "--show-current"],
+            capture_output=True, text=True, timeout=2,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _to_display_hint(raw: str) -> str:
+    """Split on word separators and join with spaces: 'my-feature' → 'my feature'."""
+    tokens = re.split(r"[-_/\s]+", raw.lower())
+    return " ".join(t for t in tokens if t)
+
+
+def infer_context(ws: Workspace) -> str:
+    """
+    Return a human-readable context hint for the workspace.
+    Priority: git branch → folder name → 'no active context'.
+    Never reads commands, keystrokes, terminal output, or file contents.
+    """
+    branch = _git_branch(ws.path)
+    if branch and branch not in _SKIP_BRANCHES:
+        parts = branch.split("/")
+        if parts[0].lower() in _SKIP_PREFIXES | _SKIP_BRANCHES:
+            branch = "/".join(parts[1:])
         if branch and branch not in _SKIP_BRANCHES:
-            kw = _clean_token(branch)
-            if kw:
-                return kw, 0.8
+            return _to_display_hint(branch)
 
-        folder = os.path.basename(ws.path.rstrip("/"))
-        kw = _clean_token(folder)
-        if kw and kw not in _SKIP_TOKENS:
-            return kw, 0.5
+    folder = os.path.basename(ws.path.rstrip("/"))
+    if folder and folder.lower() not in _SKIP_TOKENS:
+        return _to_display_hint(folder)
 
-        kw = _clean_token(ws.name)
-        if kw:
-            return kw, 0.3
+    return "no active context"
 
-        return "", 0.0
 
-    def _git_branch(self, path: str) -> str:
+_HINTS_PATH = os.path.join(_LOG_DIR, "hints.json")
+
+
+class HintStore:
+    """
+    Persists one resume_hint per workspace to ~/.waypoint/hints.json.
+
+    The hint is only written when a meaningful git branch is active, so it
+    survives switches back to main/master without being cleared.  The caller
+    reads whatever was last stored — which may be from a previous session.
+    """
+
+    def __init__(self, path: str = _HINTS_PATH) -> None:
+        self._path  = path
+        self._hints: dict[str, str] = self._load()
+
+    def get(self, name: str) -> Optional[str]:
+        return self._hints.get(name)
+
+    def set(self, name: str, hint: str) -> None:
+        if self._hints.get(name) == hint:
+            return
+        self._hints[name] = hint
+        self._persist()
+
+    def update_from_workspace(self, ws: Workspace) -> Optional[str]:
+        """
+        If the workspace has a meaningful git branch, persist it as the hint.
+        Returns the currently stored hint (may pre-date the current branch).
+        """
+        branch = _git_branch(ws.path)
+        if branch and branch not in _SKIP_BRANCHES:
+            parts = branch.split("/")
+            if parts[0].lower() in _SKIP_PREFIXES | _SKIP_BRANCHES:
+                branch = "/".join(parts[1:])
+            if branch and branch not in _SKIP_BRANCHES:
+                hint = _to_display_hint(branch)
+                if hint:
+                    self.set(ws.name, hint)
+        return self.get(ws.name)
+
+    def _load(self) -> dict[str, str]:
         try:
-            r = subprocess.run(
-                ["git", "-C", path, "branch", "--show-current"],
-                capture_output=True, text=True, timeout=2,
-            )
-            return r.stdout.strip() if r.returncode == 0 else ""
-        except Exception:
-            return ""
+            with open(self._path) as fh:
+                data = json.load(fh)
+                return data if isinstance(data, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
 
-
-# ── Module-level helper ───────────────────────────────────────────────────────
-
-def _clean_token(raw: str) -> str:
-    """Return the first meaningful lowercase token from a name or branch path."""
-    tokens = re.split(r"[^a-z0-9]+", raw.lower())
-    tokens = [t for t in tokens if len(t) > 2 and t not in _SKIP_TOKENS]
-    return tokens[0] if tokens else ""
+    def _persist(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            with open(self._path, "w") as fh:
+                json.dump(self._hints, fh, indent=2)
+        except OSError:
+            pass
