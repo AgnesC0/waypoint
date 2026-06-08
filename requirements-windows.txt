@@ -1,0 +1,7 @@
+# Windows runtime dependencies
+# Install with: pip install -r requirements-windows.txt
+
+-r requirements.txt
+
+psutil>=5.9        # required: process enumeration and CWD detection
+pywin32>=306       # optional: window focus on click (focus silently no-ops without it)

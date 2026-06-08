@@ -1,5 +1,6 @@
 # Waypoint runtime dependencies
-# tkinter ships with CPython on macOS — no install needed.
-# lsof and osascript are macOS system utilities — no install needed.
+# tkinter ships with CPython — no install needed.
+# macOS: lsof and osascript are system utilities — no install needed.
+# Windows: see requirements-windows.txt for additional dependencies.
 
 PyYAML>=6.0
