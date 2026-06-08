@@ -17,6 +17,7 @@ from tkinter import font as tkfont
 from typing import Optional
 
 from detector import Workspace
+from logger import WorkspaceLogger
 
 # ── Color palette (monochrome only) ─────────────────────────────────────────
 _BG          = "#0f0f0f"   # window background
@@ -44,6 +45,7 @@ class HUD:
         self._drag_x = 0
         self._drag_y = 0
         self._row_widgets: list[tk.Widget] = []
+        self._logger = WorkspaceLogger()
 
         self._setup_window()
         self._build_header()
@@ -131,15 +133,20 @@ class HUD:
             )
         m.add_cascade(label="Opacity", menu=sub)
         m.add_separator()
-        m.add_command(label="Quit", command=self.root.destroy)
+        m.add_command(label="Quit", command=self._quit)
         m.tk_popup(e.x_root, e.y_root)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
 
     def _poll(self) -> None:
         workspaces = self.detector.detect()
+        self._logger.update(workspaces)
         self._refresh(workspaces)
         self.root.after(self.poll_ms, self._poll)
+
+    def _quit(self) -> None:
+        self._logger.shutdown()
+        self.root.destroy()
 
     # ── Refresh ───────────────────────────────────────────────────────────────
 

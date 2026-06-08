@@ -30,6 +30,8 @@ class Workspace:
     path: str         # absolute real path from config
     window_id: str    # Terminal window ID — used only inside focus()
     tab_index: int    # 1-based index of the tab within its window
+    tty: str = ""     # terminal device path at detection time
+    cwd: str = ""     # actual shell cwd at detection time
     last_seen: float = field(default_factory=time.time)
 
     @property
@@ -250,6 +252,8 @@ class Detector:
                 path=project["path"],
                 window_id=tty_to_window.get(tty, ""),
                 tab_index=tty_to_tab_index.get(tty, 1),
+                tty=tty,
+                cwd=cwd,
             )
 
         # Return workspaces in config.yaml order, not detection order.
