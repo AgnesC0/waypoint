@@ -127,6 +127,7 @@ class WindowsDetector(BaseDetector):
 
     def detect(self) -> list[Workspace]:
         workspace_map: dict[str, Workspace] = {}
+        _home = os.path.expanduser("~")
 
         for proc in _iter_shell_procs():
             cwd = _cwd_for_proc(proc)
@@ -134,8 +135,14 @@ class WindowsDetector(BaseDetector):
                 continue
 
             project = self._match(cwd)
-            if not project:
-                continue
+            if project:
+                name = project["name"]
+                path = project["path"]
+            else:
+                if cwd == _home or os.path.dirname(cwd) == cwd:
+                    continue
+                name = os.path.basename(cwd) or cwd
+                path = cwd
 
             # Prefer the Windows Terminal window handle when the shell is a
             # WT tab; fall back to the shell's own console HWND; then to
@@ -148,9 +155,9 @@ class WindowsDetector(BaseDetector):
                 hwnd = _hwnd_for_pid(proc.pid)
             window_id = str(hwnd) if hwnd else str(proc.pid)
 
-            workspace_map[project["name"]] = Workspace(
-                name=project["name"],
-                path=project["path"],
+            workspace_map[name] = Workspace(
+                name=name,
+                path=path,
                 window_id=window_id,
                 tab_index=1,
                 tty="",

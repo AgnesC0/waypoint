@@ -40,6 +40,10 @@ _X_HDR    = 23
 _X_CK     = 11
 _X_NAME   = 23
 _X_HINT   = 29    # hint and recency lines are indented
+_X_MINIMIZE = _W - 14  # center x of header minimize button
+_R_MINIMIZE = 6         # radius of minimize circle
+_C_MINIMIZE = '#ffd60a' # macOS yellow
+_C_MINIMIZE_LINE = '#7a5800'  # minus stroke
 
 # y offsets within each workspace row
 _Y_ITEM_NAME = 13
@@ -127,6 +131,7 @@ class HUD:
         self._context_since: float            = time.time()
         self._workspaces: list[Workspace]     = []
         self._hover_name: Optional[str]       = None
+        self._collapsed: bool                 = False
 
         self._px = self._py = 0
         self._ox = self._oy = 0
@@ -188,14 +193,32 @@ class HUD:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _redraw(self) -> None:
-        h = self._full_h()
+        open_ws = {ws.name: ws for ws in self._workspaces}
+        config_name_set = {p['name'] for p in self._all_projects}
+        now = time.time()
+
+        # Configured open workspaces in config order, then untracked open ones,
+        # then recently closed (within 24 h) sorted newest-first.
+        display: list[str] = []
+        for p in self._all_projects:
+            if p['name'] in open_ws:
+                display.append(p['name'])
+        for ws in self._workspaces:
+            if ws.name not in config_name_set:
+                display.append(ws.name)
+        for name, ts in sorted(self._last_seen._data.items(), key=lambda x: -x[1]):
+            if name not in open_ws and (now - ts) < 86400:
+                display.append(name)
+
+        h = (_HEADER_H if (self._collapsed or not display)
+             else _HEADER_H + 1 + len(display) * _ITEM_H + _PAD_B)
         self._set_geometry(h)
 
         cv = self._cv
         cv.delete('all')
         _rrect(cv, 0, 0, _W, h, _R, fill=_PILL, outline='', width=0)
 
-        # Header: ● ActiveWorkspace · duration
+        # Header: ● ActiveWorkspace · duration  +  minimize button
         cur = self._active()
         cy  = _HEADER_H // 2
         if cur:
@@ -209,16 +232,23 @@ class HUD:
                        text=header_text,
                        fill=_TXT_ON if cur else _TXT_OFF, font=_F_NAME)
 
-        if not self._all_projects:
+        # Minimize button (yellow circle with minus, top-right of header)
+        cv.create_oval(_X_MINIMIZE - _R_MINIMIZE, cy - _R_MINIMIZE,
+                       _X_MINIMIZE + _R_MINIMIZE, cy + _R_MINIMIZE,
+                       fill=_C_MINIMIZE, outline='', tags='minimize')
+        cv.create_line(_X_MINIMIZE - 3, cy, _X_MINIMIZE + 3, cy,
+                       fill=_C_MINIMIZE_LINE, width=1.5, capstyle='round', tags='minimize')
+        cv.tag_bind('minimize', '<ButtonRelease-1>',
+                    lambda e: self._toggle_collapse())
+
+        if self._collapsed or not display:
             return
 
         cv.create_line(_R+2, _HEADER_H, _W-_R-2, _HEADER_H,
                        fill=_SEP, width=0.5)
 
-        open_ws = {ws.name: ws for ws in self._workspaces}
         iy = _HEADER_H + 1
-        for proj in self._all_projects:
-            name = proj['name']
+        for name in display:
             self._draw_row(name, open_ws.get(name), iy)
             iy += _ITEM_H
 
@@ -262,6 +292,8 @@ class HUD:
         if ws is not None:
             cv.tag_bind(tag, '<ButtonRelease-1>',
                         lambda e, n=name: self._row_click(n))
+        else:
+            cv.tag_unbind(tag, '<ButtonRelease-1>')
 
     # ── Interaction ───────────────────────────────────────────────────────────
 
@@ -290,12 +322,21 @@ class HUD:
             self._hover_name = None
             self._redraw()
 
+    def _toggle_collapse(self) -> None:
+        if self._dragged:
+            return
+        self._collapsed = not self._collapsed
+        self._redraw()
+
     def _row_click(self, name: str) -> None:
         if self._dragged:
             return
         ws = next((w for w in self._workspaces if w.name == name), None)
         if ws:
+            print(f"[Waypoint] click → focus: row={name!r}  path={ws.path}  window_id={ws.window_id}")
             self.detector.focus(ws)
+        else:
+            print(f"[Waypoint] click: row={name!r}  (recently closed — no focus)")
         self._current_name     = name
         self._context_since    = time.time()
         self._last_active_name = name
@@ -332,6 +373,7 @@ class HUD:
     def _poll(self) -> None:
         workspaces = self.detector.detect()
         self._logger.update(workspaces)
+
         self._workspaces = workspaces
 
         # Keep _current_name pointing at an open workspace

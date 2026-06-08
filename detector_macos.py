@@ -8,6 +8,7 @@ Detection pipeline:
   4. _match()    → compare CWD variants against configured project paths
 """
 
+import os
 import subprocess
 from typing import Optional
 
@@ -176,14 +177,21 @@ class MacOSDetector(BaseDetector):
         # entries for the same project (predictable, no activity tracking).
         workspace_map: dict[str, Workspace] = {}
 
+        _home = os.path.expanduser("~")
         for pid, cwd in cwds.items():
             project = self._match(cwd)
-            if not project:
-                continue
+            if project:
+                name = project["name"]
+                path = project["path"]
+            else:
+                if cwd == _home or os.path.dirname(cwd) == cwd:
+                    continue
+                name = os.path.basename(cwd) or cwd
+                path = cwd
             tty = pid_to_tty.get(pid, "")
-            workspace_map[project["name"]] = Workspace(
-                name=project["name"],
-                path=project["path"],
+            workspace_map[name] = Workspace(
+                name=name,
+                path=path,
                 window_id=tty_to_window.get(tty, ""),
                 tab_index=tty_to_tab_index.get(tty, 1),
                 tty=tty,
