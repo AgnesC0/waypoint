@@ -189,8 +189,8 @@ def _to_display_hint(raw: str) -> str:
 
 def infer_context(ws: Workspace) -> str:
     """
-    Return a human-readable context hint for the workspace.
-    Priority: git branch → folder name → 'no active context'.
+    Return a human-readable context string for log events.
+    Uses git branch only; returns empty string when on main/master or no branch.
     Never reads commands, keystrokes, terminal output, or file contents.
     """
     branch = _git_branch(ws.path)
@@ -200,12 +200,7 @@ def infer_context(ws: Workspace) -> str:
             branch = "/".join(parts[1:])
         if branch and branch not in _SKIP_BRANCHES:
             return _to_display_hint(branch)
-
-    folder = os.path.basename(ws.path.rstrip("/"))
-    if folder and folder.lower() not in _SKIP_TOKENS:
-        return _to_display_hint(folder)
-
-    return "no active context"
+    return ""
 
 
 _HINTS_PATH = os.path.join(_LOG_DIR, "hints.json")
@@ -215,29 +210,55 @@ class HintStore:
     """
     Persists one resume_hint per workspace to ~/.waypoint/hints.json.
 
-    The hint is only written when a meaningful git branch is active, so it
-    survives switches back to main/master without being cleared.  The caller
-    reads whatever was last stored — which may be from a previous session.
+    Each entry is stored as {"hint": str, "manual": bool}.
+    Manual hints (set via the CLI) take priority over git-branch auto-detection
+    and are never overwritten by the poll loop.
+
+    Storage format:
+        {
+          "Waypoint":     {"hint": "fix HUD resume hint", "manual": true},
+          "CogPass Light": {"hint": "execution cost model", "manual": false}
+        }
     """
 
     def __init__(self, path: str = _HINTS_PATH) -> None:
         self._path  = path
-        self._hints: dict[str, str] = self._load()
+        self._hints: dict[str, dict] = self._load()
+
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def get(self, name: str) -> Optional[str]:
-        return self._hints.get(name)
+        entry = self._hints.get(name)
+        return entry["hint"] if isinstance(entry, dict) else None
 
-    def set(self, name: str, hint: str) -> None:
-        if self._hints.get(name) == hint:
+    def set_manual(self, name: str, raw: str) -> None:
+        """Validate and store a user-provided hint; marks it as manual."""
+        hint = raw.strip().split("\n")[0].strip()[:40]
+        if not hint:
             return
-        self._hints[name] = hint
+        entry = self._hints.get(name, {})
+        if isinstance(entry, dict) and entry.get("manual") and entry.get("hint") == hint:
+            return
+        self._hints[name] = {"hint": hint, "manual": True}
         self._persist()
+
+    def clear(self, name: str) -> None:
+        """Remove the hint for a workspace; auto-detection resumes next poll."""
+        if name in self._hints:
+            del self._hints[name]
+            self._persist()
 
     def update_from_workspace(self, ws: Workspace) -> Optional[str]:
         """
-        If the workspace has a meaningful git branch, persist it as the hint.
-        Returns the currently stored hint (may pre-date the current branch).
+        If the workspace has a meaningful git branch, persist it as the hint
+        — unless a manual hint already exists for this workspace.
+        Returns the currently stored hint (None when on main/master with no
+        prior hint; the ↳ line is omitted in that case).
         """
+        entry = self._hints.get(ws.name)
+        if isinstance(entry, dict) and entry.get("manual"):
+            return entry["hint"]
+
         branch = _git_branch(ws.path)
         if branch and branch not in _SKIP_BRANCHES:
             parts = branch.split("/")
@@ -246,14 +267,33 @@ class HintStore:
             if branch and branch not in _SKIP_BRANCHES:
                 hint = _to_display_hint(branch)
                 if hint:
-                    self.set(ws.name, hint)
+                    self._set_auto(ws.name, hint)
+
         return self.get(ws.name)
 
-    def _load(self) -> dict[str, str]:
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _set_auto(self, name: str, hint: str) -> None:
+        entry = self._hints.get(name)
+        if isinstance(entry, dict) and entry.get("hint") == hint:
+            return
+        self._hints[name] = {"hint": hint, "manual": False}
+        self._persist()
+
+    def _load(self) -> dict[str, dict]:
         try:
             with open(self._path) as fh:
                 data = json.load(fh)
-                return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            # Only accept entries in the current dict format {hint, manual}.
+            # Flat-string values from older versions (folder-name seeds) are
+            # discarded — they were never meaningful resume hints.
+            return {
+                k: v
+                for k, v in data.items()
+                if isinstance(v, dict) and "hint" in v and "manual" in v
+            }
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
 
