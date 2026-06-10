@@ -132,11 +132,12 @@ class HUD:
         self._workspaces: list[Workspace]     = []
         self._hover_name: Optional[str]       = None
         self._collapsed: bool                 = False
-        # Tty of the focused Terminal tab as of the last poll; "" when Terminal
-        # is not frontmost.  Kept separate from _current_name so that
-        # continuity (header, timer) survives app-switches while live rendering
-        # requires a fresh tty match every cycle.
+        # Focus signals as of the last poll; "" when not available / not frontmost.
+        # Kept separate from _current_name so header continuity survives app-switches
+        # while the live/✓ indicator requires a fresh match every cycle.
+        # macOS uses _focused_tty (tab-level); Windows uses _focused_window_id (window-level).
         self._focused_tty: str = ""
+        self._focused_window_id: str = ""
         # Per-workspace hint derived this poll cycle.  Live signals (foreground
         # command, dirty files) land here without touching hints.json so they
         # never overwrite manual annotations.  Rebuilt from scratch every cycle.
@@ -262,15 +263,16 @@ class HUD:
     def _draw_row(self, name: str, ws: Optional[Workspace], y: int) -> None:
         cv   = self._cv
         tag  = f'row::{name}'
-        # "live" requires three things simultaneously:
-        #   1. terminal is present in the current process table  (ws is not None)
-        #   2. Terminal.app is currently frontmost               (_focused_tty truthy)
-        #   3. this workspace's tty is the focused tab           (tty match)
-        # Preserving _current_name for header continuity is NOT sufficient —
-        # a running-but-unfocused tab must never render as live.
-        live = (ws is not None
-                and bool(self._focused_tty)
-                and ws.tty == self._focused_tty)
+        # "live" requires: terminal present in process table, AND either:
+        #   macOS: Terminal.app frontmost + tty matches the focused tab
+        #   Windows: foreground HWND matches this workspace's window_id
+        # _current_name continuity (header) is NOT sufficient — unfocused must not be live.
+        if self._focused_tty:
+            live = ws is not None and ws.tty == self._focused_tty
+        elif self._focused_window_id:
+            live = ws is not None and ws.window_id == self._focused_window_id
+        else:
+            live = False
         hot  = name == self._hover_name
         # Live hints (terminal command, dirty files) take precedence; fall back
         # to the persisted store (manual annotation, branch, git log).
@@ -398,16 +400,25 @@ class HUD:
         self._workspaces = workspaces
         valid = {ws.name: ws for ws in workspaces}
 
-        # Rebuild focused-tty from the live OS window state every cycle.
-        # _focused_tty drives the live/✓ indicator; "" means Terminal is not
-        # frontmost so no row is live even if a terminal is running.
+        # Rebuild focus signal from the live OS state every cycle.
+        # macOS: focused_tty() gives tab-level accuracy via tty match.
+        # Windows: focused_window_id() gives window-level accuracy via HWND match.
+        # Either "" means the terminal is not frontmost → no row is live.
         self._focused_tty = getattr(self.detector, 'focused_tty', lambda: "")()
+        self._focused_window_id = getattr(self.detector, 'focused_window_id', lambda: "")()
+
         if self._focused_tty:
             focused_ws = next(
                 (w for w in workspaces if w.tty == self._focused_tty), None
             )
             if focused_ws:
-                # Update _current_name only when we have a confirmed tty match.
+                # Update _current_name only when we have a confirmed match.
+                self._current_name = focused_ws.name
+        elif self._focused_window_id:
+            focused_ws = next(
+                (w for w in workspaces if w.window_id == self._focused_window_id), None
+            )
+            if focused_ws:
                 self._current_name = focused_ws.name
 
         # Clear _current_name when its terminal closes; do NOT reassign to

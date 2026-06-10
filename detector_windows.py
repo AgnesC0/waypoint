@@ -17,11 +17,18 @@ Supported terminals
 Field behaviour on Windows
   tty        → always ""  (no Unix tty concept)
   tab_index  → always 1   (WT tab enumeration requires UI Automation; deferred)
+  pid        → shell process PID as string
   window_id  → HWND as decimal string, or str(pid) when pywin32 is absent
+
+Active workspace detection
+  macOS uses tty-matching for tab-level accuracy; Windows has no tty.
+  focused_window_id() returns the foreground HWND so the HUD can mark
+  a workspace live when its terminal window is frontmost.
+  Tab-level detection within Windows Terminal is not yet implemented.
 
 Dependencies
   psutil>=5.9     required — install via requirements-windows.txt
-  pywin32>=306    optional — window focus will silently no-op without it
+  pywin32>=306    optional — window focus and active detection silent no-op without it
 """
 
 import os
@@ -162,10 +169,26 @@ class WindowsDetector(BaseDetector):
                 tab_index=1,
                 tty="",
                 cwd=cwd,
+                pid=str(proc.pid),
             )
 
         return sorted(workspace_map.values(),
                       key=lambda ws: self._order.get(ws.name, len(self._projects)))
+
+    def focused_window_id(self) -> str:
+        """Return the foreground window's HWND as a string, or '' if pywin32 is absent.
+
+        Analogous to MacOSDetector.focused_tty(): lets the HUD mark a workspace
+        live when its terminal window is the frontmost window.  When the user is
+        in another app the HWND won't match any workspace, so no row shows live.
+        Tab-level accuracy within Windows Terminal is not yet implemented.
+        """
+        try:
+            import win32gui
+            hwnd = win32gui.GetForegroundWindow()
+            return str(hwnd) if hwnd else ""
+        except Exception:
+            return ""
 
     def focus(self, workspace: Workspace) -> None:
         """
