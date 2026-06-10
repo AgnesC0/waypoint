@@ -154,7 +154,41 @@ def _batch_cwds(pids: list[str]) -> dict[str, str]:
 # MacOSDetector
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Step 0 — detect the focused Terminal.app tab
+# ---------------------------------------------------------------------------
+
+def _focused_tty() -> str:
+    """Return the tty of the currently selected Terminal.app tab.
+
+    Returns '' when Terminal is not frontmost or no tab is selected,
+    so callers can distinguish "Terminal focused, known tab" from
+    "user is in another app" without changing the stored active workspace.
+    """
+    script = """
+    tell application "System Events"
+        if not (exists process "Terminal") then return ""
+    end tell
+    tell application "Terminal"
+        if not frontmost then return ""
+        try
+            return tty of selected tab of front window
+        end try
+        return ""
+    end tell
+    """
+    return _applescript(script)
+
+
+# ---------------------------------------------------------------------------
+# MacOSDetector
+# ---------------------------------------------------------------------------
+
 class MacOSDetector(BaseDetector):
+
+    def focused_tty(self) -> str:
+        """Return the tty of the focused Terminal tab, or '' if Terminal is not frontmost."""
+        return _focused_tty()
 
     def detect(self) -> list[Workspace]:
         tabs = _terminal_tabs()
@@ -196,6 +230,7 @@ class MacOSDetector(BaseDetector):
                 tab_index=tty_to_tab_index.get(tty, 1),
                 tty=tty,
                 cwd=cwd,
+                pid=pid,
             )
 
         return sorted(workspace_map.values(),

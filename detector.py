@@ -29,6 +29,7 @@ class Workspace:
     tab_index: int    # 1-based tab index; 1 when tabs are unsupported
     tty: str = ""     # terminal device path; "" on Windows
     cwd: str = ""     # actual shell cwd at detection time
+    pid: str = ""     # shell process PID; used for foreground-command detection
     last_seen: float = field(default_factory=time.time)
 
     @property

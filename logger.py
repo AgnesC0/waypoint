@@ -27,6 +27,18 @@ from detector import Workspace
 _LOG_DIR  = os.path.expanduser("~/.waypoint")
 _LOG_PATH = os.path.join(_LOG_DIR, "activity_log.jsonl")
 
+_SHELLS = {"zsh", "bash", "sh", "fish", "tcsh", "csh", "ksh"}
+
+# Generic tool names that are not meaningful as work-context hints.
+# If the foreground command matches one of these, skip it and fall through
+# to semantic context.
+_GENERIC_CMDS = frozenset({
+    "claude", "zsh", "bash", "sh", "fish", "csh", "tcsh", "ksh",
+    "python", "python3", "ruby", "node", "npm", "pnpm", "yarn",
+    "vim", "nvim", "vi", "less", "cat", "tail", "top", "htop",
+    "man", "grep", "awk", "sed", "curl", "wget",
+})
+
 # Branches too generic to carry task signal
 _SKIP_BRANCHES = {
     "main", "master", "develop", "dev",
@@ -38,6 +50,44 @@ _SKIP_PREFIXES = {"feature", "fix", "bugfix", "feat", "chore", "refactor", "hotf
 
 # Tokens too generic to use as a keyword
 _SKIP_TOKENS = {"app", "web", "api", "lib", "src", "new", "old", "test", "light", "dark"}
+
+# Task synthesis: verb overrides (checked before domain lookup)
+_VERB_SIGNALS: list[tuple[frozenset, str]] = [
+    (frozenset({"fix", "bug", "error", "broken", "crash", "issue", "wrong"}), "fix"),
+    (frozenset({"debug", "investigate", "trace", "diagnose"}),                "debug"),
+    (frozenset({"refactor", "restructure", "cleanup"}),                       "refactor"),
+    (frozenset({"optimize", "perf", "performance", "speed"}),                 "optimize"),
+    (frozenset({"check", "validate", "verify"}),                              "check"),
+]
+
+# Task synthesis: domain vocabulary → (default_verb, subject_phrase)
+# Higher intersection count wins; ties broken by list order (specific first).
+_DOMAIN_VOCAB: list[tuple[frozenset, str, str]] = [
+    (frozenset({"tty", "applescript", "focused"}),    "debug",   "terminal detection"),
+    (frozenset({"macos", "platform"}),                "debug",   "terminal detection"),
+    (frozenset({"detect", "detector"}),               "debug",   "workspace detection"),
+    (frozenset({"semantic", "diff", "hint"}),         "improve", "semantic hint generation"),
+    (frozenset({"hint", "resume"}),                   "improve", "hint generation"),
+    (frozenset({"redraw", "canvas"}),                 "improve", "HUD rendering"),
+    (frozenset({"hud", "live"}),                      "improve", "HUD live hints"),
+    (frozenset({"hud", "row"}),                       "improve", "HUD rows"),
+    (frozenset({"logger"}),                           "update",  "workspace logging"),
+    (frozenset({"log", "session", "event"}),          "update",  "activity logging"),
+    (frozenset({"diff", "staged"}),                   "update",  "git diff"),
+    (frozenset({"commit", "branch"}),                 "update",  "git integration"),
+    (frozenset({"hud"}),                              "improve", "HUD"),
+    (frozenset({"config", "yaml"}),                   "update",  "project config"),
+    (frozenset({"workspace"}),                        "update",  "workspace handling"),
+    (frozenset({"poll", "timer", "refresh"}),         "improve", "polling"),
+    (frozenset({"focus", "window", "tab"}),           "improve", "window focus"),
+    (frozenset({"test", "spec"}),                     "improve", "tests"),
+]
+
+_HINT_STOP = frozenset({
+    "the", "and", "for", "with", "from", "into", "onto", "that", "this", "via",
+    "self", "cls", "new", "get", "set", "run", "init", "main",
+    "src", "lib", "app", "util", "utils", "base", "core",
+})
 
 
 class WorkspaceLogger:
@@ -170,6 +220,166 @@ class WorkspaceLogger:
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
 
+def _foreground_command(tty: str, shell_pid: str) -> str:
+    """Return the foreground non-shell process running in this terminal, or ''.
+
+    Uses pgrep to find direct children of the shell PID, then ps to read
+    their command lines.  Returns '' when the shell is idle at the prompt
+    (no children) or when detection fails.
+    """
+    if not tty or not shell_pid:
+        return ""
+    try:
+        child_r = subprocess.run(
+            ["pgrep", "-P", shell_pid],
+            capture_output=True, text=True, timeout=1,
+        )
+        child_pids = [p.strip() for p in child_r.stdout.strip().splitlines() if p.strip()]
+        if not child_pids:
+            return ""  # shell is idle
+
+        r = subprocess.run(
+            ["ps", "-p", ",".join(child_pids), "-o", "comm=,args="],
+            capture_output=True, text=True, timeout=1,
+        )
+        for line in r.stdout.strip().splitlines():
+            parts = line.strip().split(None, 1)
+            if not parts:
+                continue
+            comm = parts[0].strip()
+            base = os.path.basename(comm).lstrip("-")
+            if base in _SHELLS or base.lower() in _GENERIC_CMDS:
+                continue
+            full_args = parts[1].strip() if len(parts) > 1 else comm
+            tokens = full_args.split()
+            cmd_name = os.path.basename(tokens[0]) if tokens else base
+            # Include a filename argument when it carries context (has an extension)
+            if len(tokens) > 1 and not tokens[1].startswith("-"):
+                fname = os.path.basename(tokens[1])
+                if fname and "." in fname:
+                    return f"{cmd_name} {fname}"[:40]
+            return cmd_name[:40]
+    except Exception:
+        pass
+    return ""
+
+
+def _clean_diff_context(raw: str) -> str:
+    """Strip language boilerplate from a diff hunk context and return readable words.
+
+    Input:  'def update_from_workspace(self, ws):'
+    Output: 'update from workspace'
+    """
+    # Remove common keyword prefixes (Python, JS/TS, Rust, Go, …).
+    # Longer alternatives must come before shorter ones to avoid partial
+    # matches (e.g. 'fn' inside 'function').
+    s = re.sub(
+        r'^(?:pub\s+)?(?:async\s+)?'
+        r'(?:export(?:\s+default)?\s*(?:function\s+|class\s+)?|'
+        r'interface|function|struct|method|class|impl|'
+        r'const|func|type|def|let|var|fn)\s*',
+        '',
+        raw.strip(),
+        flags=re.IGNORECASE,
+    )
+    # Extract first identifier; skip leading underscores
+    m = re.match(r'_*([A-Za-z][A-Za-z0-9_]*)', s)
+    if not m:
+        return ''
+    name = m.group(1)
+    if len(name) < 3 or name.lower() in {'cls', 'self', 'the', 'new'}:
+        return ''
+    # CamelCase → 'camel case'
+    name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
+    name = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', name)
+    # snake_case → 'snake case'
+    name = name.replace('_', ' ').lower().strip()
+    return name if len(name) > 2 else ''
+
+
+def _synthesize_task_hint(contexts: list[str], files: list[str]) -> str:
+    """Convert diff contexts and changed file names into a natural-language task phrase.
+
+    Answers "what was I working on?" rather than "what function changed?".
+    """
+    raw = " ".join(contexts) + " " + " ".join(
+        re.sub(r'[-_.]', ' ', os.path.splitext(f)[0]) for f in files
+    )
+    tokens = frozenset(re.findall(r'[a-z]+', raw.lower())) - _HINT_STOP
+
+    if not tokens:
+        return ''
+
+    verb_override: Optional[str] = None
+    for signals, v in _VERB_SIGNALS:
+        if tokens & signals:
+            verb_override = v
+            break
+
+    best_score = 0
+    best_verb = "update"
+    best_subject = ""
+    for domain_tokens, dv, subj in _DOMAIN_VOCAB:
+        score = len(tokens & domain_tokens)
+        if score > best_score:
+            best_score = score
+            best_verb = dv
+            best_subject = subj
+
+    if not best_subject:
+        sig = sorted(t for t in tokens if len(t) > 3)[:2]
+        if not sig:
+            return ''
+        best_subject = ' '.join(sig)
+
+    return f"{verb_override or best_verb} {best_subject}"[:40]
+
+
+def _diff_hint(path: str, extra: list[str]) -> str:
+    """Parse one git diff and return a semantic hint (staged or unstaged).
+
+    Prefers hunk-context function/class names (most specific);
+    falls back to cleaned file names when no contexts are present.
+    """
+    try:
+        r = subprocess.run(
+            ['git', '-C', path, 'diff', '-U0'] + extra,
+            capture_output=True, text=True, timeout=2,
+        )
+    except Exception:
+        return ''
+    if r.returncode != 0 or not r.stdout.strip():
+        return ''
+
+    files: list[str] = []
+    contexts: list[str] = []
+    for line in r.stdout.splitlines():
+        if line.startswith('+++ b/'):
+            fname = line[6:].strip()
+            if fname != '/dev/null':
+                files.append(os.path.basename(fname))
+        elif line.startswith('@@ '):
+            m = re.search(r'@@ [^@]+ @@ (.+)', line)
+            if m:
+                ctx = _clean_diff_context(m.group(1))
+                if ctx:
+                    contexts.append(ctx)
+
+    if not files:
+        return ''
+
+    return _synthesize_task_hint(contexts, files)
+
+
+def _git_semantic_hint(path: str) -> str:
+    """Return a semantic hint derived from the current working-tree diff.
+
+    Checks staged changes first (more intentional), then unstaged.
+    Returns '' for a clean tree.
+    """
+    return _diff_hint(path, ['--cached']) or _diff_hint(path, [])
+
+
 def _git_branch(path: str) -> str:
     try:
         r = subprocess.run(
@@ -177,6 +387,29 @@ def _git_branch(path: str) -> str:
             capture_output=True, text=True, timeout=2,
         )
         return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _git_last_commit(path: str) -> str:
+    """Return the most recent commit subject, stripped of conventional-commit prefixes."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", path, "log", "-1", "--pretty=format:%s"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode != 0:
+            return ""
+        subject = r.stdout.strip()
+        # Strip conventional commit type prefix: "feat: ", "fix(scope): ", etc.
+        subject = re.sub(
+            r'^(?:feat|fix|docs|chore|refactor|test|style|perf|ci|build)'
+            r'(?:\([^)]+\))?!?:\s*',
+            '',
+            subject,
+            flags=re.IGNORECASE,
+        )
+        return subject[:40] if subject else ""
     except Exception:
         return ""
 
@@ -190,7 +423,7 @@ def _to_display_hint(raw: str) -> str:
 def infer_context(ws: Workspace) -> str:
     """
     Return a human-readable context string for log events.
-    Uses git branch only; returns empty string when on main/master or no branch.
+    Tries git branch first; falls back to the last commit subject.
     Never reads commands, keystrokes, terminal output, or file contents.
     """
     branch = _git_branch(ws.path)
@@ -200,7 +433,7 @@ def infer_context(ws: Workspace) -> str:
             branch = "/".join(parts[1:])
         if branch and branch not in _SKIP_BRANCHES:
             return _to_display_hint(branch)
-    return ""
+    return _git_last_commit(ws.path)
 
 
 _HINTS_PATH = os.path.join(_LOG_DIR, "hints.json")
@@ -251,26 +484,39 @@ class HintStore:
             self._persist()
 
     def update_from_workspace(self, ws: Workspace) -> Optional[str]:
-        """
-        If the workspace has a meaningful git branch, persist it as the hint
-        — unless a manual hint already exists for this workspace.
-        Returns the currently stored hint (None when on main/master with no
-        prior hint; the ↳ line is omitted in that case).
+        """Derive the best user-facing hint for this poll cycle.
+
+        Priority (user-facing, most to least specific):
+          1. Manual hint  — explicit annotation set via CLI; always respected.
+          2. Semantic diff hint — function/class names from the working-tree
+             diff; display-only, never persisted, refreshes every cycle.
+          3. Last git commit subject — static fallback; persisted as auto-hint
+             so the hint survives after the repo becomes clean.
+          4. Specific foreground command — only if not a generic tool name
+             (see _GENERIC_CMDS); display-only.
         """
         self._maybe_reload()
+
+        # 1. Manual hint
         entry = self._hints.get(ws.name)
         if isinstance(entry, dict) and entry.get("manual"):
             return entry["hint"]
 
-        branch = _git_branch(ws.path)
-        if branch and branch not in _SKIP_BRANCHES:
-            parts = branch.split("/")
-            if parts[0].lower() in _SKIP_PREFIXES | _SKIP_BRANCHES:
-                branch = "/".join(parts[1:])
-            if branch and branch not in _SKIP_BRANCHES:
-                hint = _to_display_hint(branch)
-                if hint:
-                    self._set_auto(ws.name, hint)
+        # 2. Semantic working-tree diff (display-only; hints.json untouched)
+        semantic = _git_semantic_hint(ws.path)
+        if semantic:
+            return semantic
+
+        # 3. Last commit subject (persisted so hint survives a clean tree)
+        commit_hint = _git_last_commit(ws.path)
+        if commit_hint:
+            self._set_auto(ws.name, commit_hint)
+            return commit_hint
+
+        # 4. Specific foreground command filtered for generic tools (display-only)
+        cmd = _foreground_command(ws.tty, ws.pid)
+        if cmd:
+            return cmd
 
         return self.get(ws.name)
 
@@ -316,6 +562,7 @@ class HintStore:
             os.makedirs(os.path.dirname(self._path), exist_ok=True)
             with open(self._path, "w") as fh:
                 json.dump(self._hints, fh, indent=2)
+            self._mtime = os.path.getmtime(self._path)
         except OSError:
             pass
 

@@ -132,6 +132,15 @@ class HUD:
         self._workspaces: list[Workspace]     = []
         self._hover_name: Optional[str]       = None
         self._collapsed: bool                 = False
+        # Tty of the focused Terminal tab as of the last poll; "" when Terminal
+        # is not frontmost.  Kept separate from _current_name so that
+        # continuity (header, timer) survives app-switches while live rendering
+        # requires a fresh tty match every cycle.
+        self._focused_tty: str = ""
+        # Per-workspace hint derived this poll cycle.  Live signals (foreground
+        # command, dirty files) land here without touching hints.json so they
+        # never overwrite manual annotations.  Rebuilt from scratch every cycle.
+        self._live_hints: dict[str, str] = {}
 
         self._px = self._py = 0
         self._ox = self._oy = 0
@@ -197,8 +206,9 @@ class HUD:
         config_name_set = {p['name'] for p in self._all_projects}
         now = time.time()
 
-        # Configured open workspaces in config order, then untracked open ones,
-        # then recently closed (within 24 h) sorted newest-first.
+        # Only currently-open workspaces are rendered.  Historical last_seen
+        # data is used for recency metadata inside rows, but it must never
+        # create a visible row on its own.
         display: list[str] = []
         for p in self._all_projects:
             if p['name'] in open_ws:
@@ -206,9 +216,6 @@ class HUD:
         for ws in self._workspaces:
             if ws.name not in config_name_set:
                 display.append(ws.name)
-        for name, ts in sorted(self._last_seen._data.items(), key=lambda x: -x[1]):
-            if name not in open_ws and (now - ts) < 86400:
-                display.append(name)
 
         h = (_HEADER_H if (self._collapsed or not display)
              else _HEADER_H + 1 + len(display) * _ITEM_H + _PAD_B)
@@ -255,9 +262,19 @@ class HUD:
     def _draw_row(self, name: str, ws: Optional[Workspace], y: int) -> None:
         cv   = self._cv
         tag  = f'row::{name}'
-        live = name == self._current_name
+        # "live" requires three things simultaneously:
+        #   1. terminal is present in the current process table  (ws is not None)
+        #   2. Terminal.app is currently frontmost               (_focused_tty truthy)
+        #   3. this workspace's tty is the focused tab           (tty match)
+        # Preserving _current_name for header continuity is NOT sufficient —
+        # a running-but-unfocused tab must never render as live.
+        live = (ws is not None
+                and bool(self._focused_tty)
+                and ws.tty == self._focused_tty)
         hot  = name == self._hover_name
-        hint = self._hints.get(name)
+        # Live hints (terminal command, dirty files) take precedence; fall back
+        # to the persisted store (manual annotation, branch, git log).
+        hint = self._live_hints.get(name) or self._hints.get(name)
         ts   = self._last_seen.get(name)
         recency = _fmt_recency(ts, live)
 
@@ -277,8 +294,15 @@ class HUD:
             cv.create_text(_X_HINT, y + _Y_ITEM_HINT, anchor='w',
                            text=f"↳ {hint}",
                            fill=_TXT_OFF, font=_F_HINT, tags=tag)
-        if recency:
-            cv.create_text(_X_HINT, y + _Y_ITEM_META, anchor='w',
+            # Show time-ago alongside the hint, but suppress "active now" —
+            # the hint already conveys context; "active now" adds nothing.
+            if recency and not live:
+                cv.create_text(_X_HINT, y + _Y_ITEM_META, anchor='w',
+                               text=f"↳ {recency}",
+                               fill=_TXT_META, font=_F_HINT, tags=tag)
+        elif recency:
+            # No hint available: recency is the only sub-line; use the hint slot.
+            cv.create_text(_X_HINT, y + _Y_ITEM_HINT, anchor='w',
                            text=f"↳ {recency}",
                            fill=_TXT_META, font=_F_HINT, tags=tag)
 
@@ -333,10 +357,7 @@ class HUD:
             return
         ws = next((w for w in self._workspaces if w.name == name), None)
         if ws:
-            print(f"[Waypoint] click → focus: row={name!r}  path={ws.path}  window_id={ws.window_id}")
             self.detector.focus(ws)
-        else:
-            print(f"[Waypoint] click: row={name!r}  (recently closed — no focus)")
         self._current_name     = name
         self._context_since    = time.time()
         self._last_active_name = name
@@ -375,11 +396,24 @@ class HUD:
         self._logger.update(workspaces)
 
         self._workspaces = workspaces
+        valid = {ws.name: ws for ws in workspaces}
 
-        # Keep _current_name pointing at an open workspace
-        valid = {ws.name for ws in workspaces}
+        # Rebuild focused-tty from the live OS window state every cycle.
+        # _focused_tty drives the live/✓ indicator; "" means Terminal is not
+        # frontmost so no row is live even if a terminal is running.
+        self._focused_tty = getattr(self.detector, 'focused_tty', lambda: "")()
+        if self._focused_tty:
+            focused_ws = next(
+                (w for w in workspaces if w.tty == self._focused_tty), None
+            )
+            if focused_ws:
+                # Update _current_name only when we have a confirmed tty match.
+                self._current_name = focused_ws.name
+
+        # Clear _current_name when its terminal closes; do NOT reassign to
+        # workspaces[0] — that would silently mark an unrelated workspace active.
         if self._current_name not in valid:
-            self._current_name = workspaces[0].name if workspaces else None
+            self._current_name = None
 
         # Reset duration timer when the active workspace changes
         active = self._active()
@@ -387,9 +421,14 @@ class HUD:
             self._context_since    = time.time()
             self._last_active_name = active.name
 
-        # Update hints and last-seen for all currently open workspaces
+        # Rebuild live hints from scratch every cycle.
+        # update_from_workspace returns the best available hint (live signal
+        # or stored fallback) without persisting transient signals.
+        self._live_hints = {}
         for ws in workspaces:
-            self._hints.update_from_workspace(ws)
+            h = self._hints.update_from_workspace(ws)
+            if h:
+                self._live_hints[ws.name] = h
             self._last_seen.touch(ws.name)
 
         self._redraw()
