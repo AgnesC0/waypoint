@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime
 from typing import Optional
 
 from detector import Workspace
@@ -172,6 +173,7 @@ class WorkspaceLogger:
             "current_workspace":  None,
             "end_reason":         end_reason,
         })
+        self._append_completed(name, session["start_time"], now, end_reason)
 
     def _emit_switch(
         self, ended_name: str, started_name: str, current: dict, now: float
@@ -197,6 +199,8 @@ class WorkspaceLogger:
             "end_reason":         "switch_workspace",
         })
 
+        self._append_completed(ended_name, session["start_time"], now, "switch_workspace")
+
         self._sessions[started_name] = {
             "start_time": now,
             "ws":         new_ws,
@@ -209,6 +213,26 @@ class WorkspaceLogger:
         try:
             with open(self._log_path, "a") as fh:
                 fh.write(json.dumps(event) + "\n")
+        except OSError:
+            pass
+
+    def _append_completed(
+        self, name: str, start_time: float, end_time: float, end_reason: str
+    ) -> None:
+        """Append one completed-session record to completed_sessions.jsonl."""
+        try:
+            record = {
+                "project":          name,
+                "start_time":       start_time,
+                "end_time":         end_time,
+                "duration_seconds": round(end_time - start_time, 2),
+                "hour":             datetime.fromtimestamp(start_time).hour,
+                "day":              _weekday_sunday_zero(start_time),
+                "end_reason":       end_reason,
+                "source":           "waypoint",
+            }
+            with open(_COMPLETED_PATH, "a") as fh:
+                fh.write(json.dumps(record) + "\n")
         except OSError:
             pass
 
@@ -434,6 +458,44 @@ def infer_context(ws: Workspace) -> str:
         if branch and branch not in _SKIP_BRANCHES:
             return _to_display_hint(branch)
     return _git_last_commit(ws.path)
+
+
+_CURRENT_SESSION_PATH = os.path.join(_LOG_DIR, "current_session.json")
+_COMPLETED_PATH       = os.path.join(_LOG_DIR, "completed_sessions.jsonl")
+
+
+def _weekday_sunday_zero(ts: float) -> int:
+    """Return weekday for a Unix timestamp with 0=Sunday (matching JS convention)."""
+    return (datetime.fromtimestamp(ts).weekday() + 1) % 7
+
+
+def write_current_session(
+    project: Optional[str], start_time: float, now: float
+) -> None:
+    """Overwrite current_session.json with the live session, or literal null if none.
+
+    Called every poll tick by the HUD. Safe to call from any thread; OSError is
+    silently swallowed so a missing ~/.waypoint dir never crashes the HUD.
+    """
+    try:
+        os.makedirs(_LOG_DIR, exist_ok=True)
+        if project is None:
+            content = "null\n"
+        else:
+            dt = datetime.fromtimestamp(now)
+            record = {
+                "project":          project,
+                "start_time":       start_time,
+                "duration_seconds": round(now - start_time, 2),
+                "hour":             dt.hour,
+                "day":              _weekday_sunday_zero(now),
+                "source":           "waypoint",
+            }
+            content = json.dumps(record) + "\n"
+        with open(_CURRENT_SESSION_PATH, "w") as fh:
+            fh.write(content)
+    except OSError:
+        pass
 
 
 _HINTS_PATH = os.path.join(_LOG_DIR, "hints.json")

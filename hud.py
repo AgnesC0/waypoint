@@ -16,7 +16,7 @@ import tkinter as tk
 from typing import Optional
 
 from detector import Workspace
-from logger import WorkspaceLogger, HintStore, LastSeenStore
+from logger import WorkspaceLogger, HintStore, LastSeenStore, write_current_session
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -431,6 +431,14 @@ class HUD:
         if active and active.name != self._last_active_name:
             self._context_since    = time.time()
             self._last_active_name = active.name
+
+        # Publish live session state for external consumers (e.g. CogPass).
+        now = time.time()
+        write_current_session(
+            active.name if active else None,
+            self._context_since,
+            now,
+        )
 
         # Rebuild live hints from scratch every cycle.
         # update_from_workspace returns the best available hint (live signal
