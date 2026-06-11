@@ -256,18 +256,26 @@ class MacOSDetector(BaseDetector):
         if not workspace.window_id:
             return
         tab_idx = workspace.tab_index or 1
+        # Set index to 1 (front of Terminal's window stack) without calling
+        # `activate`, which would raise every Terminal window.  Then use
+        # AXRaise via System Events to bring only that window to the screen
+        # foreground.
         _applescript(f"""
         tell application "Terminal"
-            activate
             repeat with w in windows
                 if (id of w as string) is "{workspace.window_id}" then
                     if miniaturized of w then set miniaturized of w to false
                     try
                         set selected tab of w to tab {tab_idx} of w
                     end try
-                    set frontmost of w to true
+                    set index of w to 1
                     exit repeat
                 end if
             end repeat
+        end tell
+        tell application "System Events"
+            tell process "Terminal"
+                perform action "AXRaise" of window 1
+            end tell
         end tell
         """)
