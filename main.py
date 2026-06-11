@@ -152,13 +152,13 @@ def _cmd_status(config: dict) -> None:
         print()
 
 
-def _run_hud(config: dict) -> None:
+def _run_hud(config: dict, debug: bool = False) -> None:
     projects = config.get("projects", [])
     if not projects:
         sys.exit("[Waypoint] No projects defined in config.yaml")
     root = tk.Tk()
     root.title("Waypoint")
-    HUD(root, config, Detector(projects))
+    HUD(root, config, Detector(projects, debug=debug))
     root.mainloop()
 
 
@@ -180,6 +180,9 @@ def main() -> None:
     hint_p.add_argument("--workspace", "-w", metavar="NAME",
                         help="Workspace name. Default: match current directory to config.")
 
+    parser.add_argument("--debug", action="store_true",
+                        help="Print per-tab CWD detection details to stdout on every poll tick.")
+
     args   = parser.parse_args()
     config = load_config()
 
@@ -188,7 +191,7 @@ def main() -> None:
     elif args.cmd == "status":
         _cmd_status(config)
     else:
-        _run_hud(config)
+        _run_hud(config, debug=args.debug)
 
 
 if __name__ == "__main__":

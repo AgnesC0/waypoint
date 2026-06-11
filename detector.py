@@ -48,7 +48,7 @@ class BaseDetector:
     Platform subclasses implement detect() and focus().
     """
 
-    def __init__(self, projects: list[dict]) -> None:
+    def __init__(self, projects: list[dict], debug: bool = False) -> None:
         self._projects = [
             {
                 "name":     p["name"],
@@ -58,6 +58,7 @@ class BaseDetector:
             for p in projects
         ]
         self._order = {p["name"]: i for i, p in enumerate(self._projects)}
+        self._debug = debug
 
     def detect(self) -> list[Workspace]:
         raise NotImplementedError

@@ -214,6 +214,22 @@ class MacOSDetector(BaseDetector):
         _home = os.path.expanduser("~")
         for pid, cwd in cwds.items():
             project = self._match(cwd)
+
+            if self._debug:
+                tty_dbg = pid_to_tty.get(pid, "?")
+                resolved = os.path.realpath(cwd)
+                if project:
+                    match_label = f"configured: {project['name']}"
+                elif cwd == _home or os.path.dirname(cwd) == cwd:
+                    match_label = "skipped (home)"
+                else:
+                    match_label = "untracked"
+                print(f"[poll] tab:          {tty_dbg}")
+                print(f"[poll] raw cwd:      {cwd}")
+                print(f"[poll] resolved cwd: {resolved}")
+                print(f"[poll] matched:      {match_label}")
+                print(flush=True)
+
             if project:
                 name = project["name"]
                 path = project["path"]

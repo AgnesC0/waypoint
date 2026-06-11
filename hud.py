@@ -255,12 +255,15 @@ class HUD:
         cv.create_line(_R+2, _HEADER_H, _W-_R-2, _HEADER_H,
                        fill=_SEP, width=0.5)
 
+        untracked_names = {ws.name for ws in self._workspaces if ws.name not in config_name_set}
+
         iy = _HEADER_H + 1
         for name in display:
-            self._draw_row(name, open_ws.get(name), iy)
+            self._draw_row(name, open_ws.get(name), iy, untracked=name in untracked_names)
             iy += _ITEM_H
 
-    def _draw_row(self, name: str, ws: Optional[Workspace], y: int) -> None:
+    def _draw_row(self, name: str, ws: Optional[Workspace], y: int,
+                  untracked: bool = False) -> None:
         cv   = self._cv
         tag  = f'row::{name}'
         # "live" requires: terminal present in process table, AND either:
@@ -290,7 +293,7 @@ class HUD:
                            text='✓', fill=_DOT, font=_F_CK, tags=tag)
         cv.create_text(_X_NAME, y + _Y_ITEM_NAME, anchor='w',
                        text=name,
-                       fill=_TXT_ON if live else _TXT_OFF,
+                       fill=_TXT_ON if live else (_TXT_META if untracked else _TXT_OFF),
                        font=_F_ROW, tags=tag)
         if hint:
             cv.create_text(_X_HINT, y + _Y_ITEM_HINT, anchor='w',
