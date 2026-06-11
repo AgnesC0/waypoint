@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# record_gif.sh — Record the full screen as an animated GIF.
+# record_gif.sh — Record the Waypoint HUD (top-right corner) as an animated GIF.
 #
 # Requirements:
 #   brew install ffmpeg          # required
 #   brew install gifsicle        # optional — smaller output file
 #
 # Usage:
-#   ./record_gif.sh              # 12-second recording, outputs waypoint_demo.gif
-#   ./record_gif.sh 15           # custom duration in seconds
+#   ./record_gif.sh              # 8-second recording, outputs waypoint_demo.gif
+#   ./record_gif.sh 12           # custom duration in seconds
 #
-# Arrange your windows before running: Waypoint HUD in corner, terminal(s)
-# with Claude Code visible. This script captures whatever is on screen.
+# Capture region targets the top-right corner on a 1680×1050 display.
+# Adjust RX/RY/RW/RH below if your resolution differs.
 
 set -e
 
-DURATION="${1:-12}"
+DURATION="${1:-8}"
 OUTPUT="waypoint_demo.gif"
-FPS=10
+FPS=15
+
+# Top-right quadrant — tuned for 1680×1050
+RX=1200
+RY=0
+RW=480
+RH=300
 
 # ── Dependency check ──────────────────────────────────────────────────────────
 if ! command -v ffmpeg &>/dev/null; then
@@ -36,14 +42,14 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 INTERVAL=$(python3 -c "print(1/$FPS)")
 echo "Recording ${DURATION}s at ${FPS}fps → ${OUTPUT}"
-echo "Interact with the screen now..."
+echo "Region: ${RX},${RY}  ${RW}×${RH}"
 echo ""
 
 FRAME=0
 END_TS=$(python3 -c "import time; print(time.time() + $DURATION)")
 
 while python3 -c "import time,sys; sys.exit(0 if time.time() < $END_TS else 1)" 2>/dev/null; do
-    screencapture -x "$TMPDIR/frame_$(printf '%04d' "$FRAME").png" 2>/dev/null
+    screencapture -x -R "${RX},${RY},${RW},${RH}" "$TMPDIR/frame_$(printf '%04d' "$FRAME").png" 2>/dev/null
     FRAME=$(( FRAME + 1 ))
     sleep "$INTERVAL"
 done
@@ -57,7 +63,7 @@ echo "Converting to GIF..."
 ffmpeg -y \
     -framerate "$FPS" \
     -i "$TMPDIR/frame_%04d.png" \
-    -vf "fps=${FPS},scale=400:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer" \
+    -vf "fps=${FPS},scale=800:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer" \
     "$OUTPUT" \
     -loglevel warning
 
