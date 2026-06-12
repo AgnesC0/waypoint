@@ -43,7 +43,6 @@ projects:
 
 ## Roadmap
 
-- [ ] Auto-sync session data to CogPass (cognitive rhythm tracker)
 - [ ] Git root detection for subdirectory support
 - [ ] Multi-monitor support
 
