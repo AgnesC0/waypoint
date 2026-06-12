@@ -141,6 +141,9 @@ class WindowsDetector(BaseDetector):
             if not cwd:
                 continue
 
+            if self._is_excluded(cwd):
+                continue
+
             project = self._match(cwd)
             if project:
                 name = project["name"]

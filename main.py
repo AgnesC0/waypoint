@@ -39,7 +39,14 @@ def load_config() -> dict:
     if not os.path.exists(path):
         sys.exit(f"[Waypoint] config.yaml not found at {path}")
     with open(path) as fh:
-        return yaml.safe_load(fh)
+        cfg = yaml.safe_load(fh)
+    # Always exclude Waypoint's own install directory regardless of config.yaml contents.
+    own_dir  = os.path.dirname(os.path.abspath(__file__))
+    own_real = os.path.realpath(own_dir)
+    excludes = cfg.setdefault("exclude", [])
+    if not any(os.path.realpath(os.path.expanduser(str(e))) == own_real for e in excludes):
+        excludes.append(own_dir)
+    return cfg
 
 
 def _cwd_workspace(projects: list[dict]) -> Optional[str]:
@@ -89,7 +96,7 @@ def _abbrev(path: str) -> str:
 
 def _cmd_status(config: dict) -> None:
     projects = config.get("projects", [])
-    detector = Detector(projects)
+    detector = Detector(projects, exclude=config.get("exclude", []))
     hint_store = HintStore()
     last_seen  = LastSeenStore()
 
@@ -158,7 +165,7 @@ def _run_hud(config: dict, debug: bool = False) -> None:
         sys.exit("[Waypoint] No projects defined in config.yaml")
     root = tk.Tk()
     root.title("Waypoint")
-    HUD(root, config, Detector(projects, debug=debug))
+    HUD(root, config, Detector(projects, debug=debug, exclude=config.get("exclude", [])))
     root.mainloop()
 
 

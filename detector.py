@@ -48,7 +48,8 @@ class BaseDetector:
     Platform subclasses implement detect() and focus().
     """
 
-    def __init__(self, projects: list[dict], debug: bool = False) -> None:
+    def __init__(self, projects: list[dict], debug: bool = False,
+                 exclude: Optional[list[str]] = None) -> None:
         self._projects = [
             {
                 "name":     p["name"],
@@ -59,6 +60,13 @@ class BaseDetector:
         ]
         self._order = {p["name"]: i for i, p in enumerate(self._projects)}
         self._debug = debug
+        nc = os.path.normcase
+        self._excluded_paths: set[str] = set()
+        for raw in (exclude or []):
+            expanded = os.path.expanduser(str(raw))
+            self._excluded_paths.add(nc(os.path.realpath(expanded)))
+            self._excluded_paths.add(nc(os.path.abspath(expanded)))
+            self._excluded_paths.add(nc(expanded))
 
     def detect(self) -> list[Workspace]:
         raise NotImplementedError
@@ -87,6 +95,17 @@ class BaseDetector:
                     if v == norm or v.startswith(norm + os.sep):
                         return project
         return None
+
+    def _is_excluded(self, cwd: str) -> bool:
+        """Return True if cwd is inside any excluded path."""
+        if not self._excluded_paths:
+            return False
+        nc = os.path.normcase
+        for v in (nc(os.path.realpath(cwd)), nc(os.path.abspath(cwd)), nc(cwd)):
+            for excl in self._excluded_paths:
+                if v == excl or v.startswith(excl + os.sep):
+                    return True
+        return False
 
 
 # ---------------------------------------------------------------------------

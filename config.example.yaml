@@ -7,6 +7,12 @@ poll_interval: 2       # seconds between scans
 opacity: 0.88          # window opacity  (0.0 – 1.0)
 position: bottom-right # top-left | top-right | bottom-left | bottom-right
 
+# Optional: paths that Waypoint should never track (e.g. its own install directory).
+# Any terminal whose CWD is inside an excluded path is silently skipped — it will
+# not appear in the HUD, logs, hints, or last_seen data.
+# exclude:
+#   - ~/waypoint
+
 projects:
   - name: MyProject
     path: ~/projects/my-project
