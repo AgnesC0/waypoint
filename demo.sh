@@ -21,7 +21,7 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     hints = {}
 
-hints["CogPass Light"] = {"hint": "update light neuro",  "manual": True}
+hints["Demo Project"] = {"hint": "update light neuro",  "manual": True}
 hints["Waypoint"]      = {"hint": "fix HUD resume hint", "manual": True}
 
 with open(path, "w") as f:
@@ -34,8 +34,8 @@ EOF
 osascript <<EOF
 tell application "Terminal"
     activate
-    -- CogPass Light window
-    set w1 to do script "cd ~/CogPass-Light && clear && echo '[ CogPass Light ]'"
+    -- Demo Project window
+    set w1 to do script "cd ~/demo-workspace && clear && echo '[ Demo Project ]'"
     delay 0.4
     -- Waypoint window
     set w2 to do script "cd $WAYPOINT_DIR && clear && echo '[ Waypoint ]'"

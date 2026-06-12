@@ -483,7 +483,7 @@ class HUD:
             self._context_since    = time.time()
             self._last_active_name = active.name
 
-        # Publish live session state for external consumers (e.g. CogPass).
+        # Publish live session state for external consumers (e.g. cognitive analytics).
         now = time.time()
         write_current_session(
             active.name if active else None,

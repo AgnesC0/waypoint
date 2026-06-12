@@ -100,9 +100,9 @@ class WorkspaceLogger:
         # name → {start_time, ws, context, hud_clicked, depth}
         self._sessions: dict[str, dict] = {}
 
-        # ── CogPass training-data state (all in-memory, never persisted as-is) ─
+        # ── cognitive tracker state (all in-memory, never persisted as-is) ──────
         # Calendar-day ordinal used to reset daily counters at midnight.
-        self._cogpass_today:      int                    = datetime.now().toordinal()
+        self._rhythm_today:       int                    = datetime.now().toordinal()
         # Per-workspace visit counter for the current calendar day.
         # Keys are workspace names — only len() is ever written to disk.
         self._today_depths:       dict[str, int]         = {}
@@ -143,12 +143,12 @@ class WorkspaceLogger:
         for name in list(self._sessions):
             self._emit_end(name, "app_quit", now)
 
-    # ── CogPass signal API ────────────────────────────────────────────────────
+    # ── cognitive tracker API ────────────────────────────────────────────────
 
     def record_hud_click(self, name: str) -> None:
         """Mark that the user navigated to this workspace by clicking the HUD.
 
-        Sets recommendation_accepted=True on the session's cogpass record.
+        Sets recommendation_accepted=True on the session's tracking record.
         If the session is not yet registered (click arrived during the 2-second
         poll gap), the flag is staged and consumed by _emit_start/_emit_switch.
         """
@@ -167,13 +167,13 @@ class WorkspaceLogger:
         if hint_type in _HINT_TYPES or hint_type is None:
             self._session_hint_type[name] = hint_type
 
-    # ── CogPass daily-counter helper ──────────────────────────────────────────
+    # ── daily rhythm counter helper ───────────────────────────────────────────
 
     def _refresh_today(self, now: float) -> None:
         """Reset per-day counters when the calendar day has rolled over."""
         today = datetime.fromtimestamp(now).toordinal()
-        if today != self._cogpass_today:
-            self._cogpass_today = today
+        if today != self._rhythm_today:
+            self._rhythm_today = today
             self._today_depths.clear()
             self._today_workspaces.clear()
 
@@ -309,9 +309,9 @@ class WorkspaceLogger:
         hud_clicked: bool,
     ) -> None:
         """Append one record to completed_sessions.jsonl (unchanged) and
-        one privacy-reduced record to cogpass_sessions.jsonl.
+        one privacy-reduced record to session_log.jsonl.
 
-        cogpass_sessions.jsonl never contains: project name, paths, commands,
+        session_log.jsonl never contains: project name, paths, commands,
         window titles, git context, absolute timestamps, or any identifier.
         """
         # ── completed_sessions.jsonl — format unchanged ───────────────────────
@@ -331,11 +331,11 @@ class WorkspaceLogger:
         except OSError:
             pass
 
-        # ── cogpass_sessions.jsonl — privacy-reduced training record ──────────
+        # ── session_log.jsonl — privacy-reduced training record ──────────────
         # Pop the hint-type label recorded during the session; None if absent.
         hint_type = self._session_hint_type.pop(name, None)
         try:
-            cogpass = {
+            session_record = {
                 "schema_version":        1,
                 "hour":                  datetime.fromtimestamp(start_time).hour,
                 "day":                   _weekday_sunday_zero(start_time),
@@ -348,8 +348,8 @@ class WorkspaceLogger:
                 "recommendation_accepted": hud_clicked,
                 "feedback_label":        None,
             }
-            with open(_COGPASS_PATH, "a") as fh:
-                fh.write(json.dumps(cogpass) + "\n")
+            with open(_SESSION_LOG_PATH, "a") as fh:
+                fh.write(json.dumps(session_record) + "\n")
         except OSError:
             pass
 
@@ -579,9 +579,9 @@ def infer_context(ws: Workspace) -> str:
 
 _CURRENT_SESSION_PATH = os.path.join(_LOG_DIR, "current_session.json")
 _COMPLETED_PATH       = os.path.join(_LOG_DIR, "completed_sessions.jsonl")
-_COGPASS_PATH         = os.path.join(_LOG_DIR, "cogpass_sessions.jsonl")
+_SESSION_LOG_PATH     = os.path.join(_LOG_DIR, "session_log.jsonl")
 
-# Allowed enum labels for cogpass hint_type.  Only these values may be written;
+# Allowed enum labels for hint_type.  Only these values may be written;
 # the actual hint text is never stored.
 _HINT_TYPES = frozenset({"manual", "semantic_diff", "commit", "foreground_cmd"})
 
@@ -634,7 +634,7 @@ class HintStore:
     Storage format:
         {
           "Waypoint":     {"hint": "fix HUD resume hint", "manual": true},
-          "CogPass Light": {"hint": "execution cost model", "manual": false}
+          "Demo Project":  {"hint": "execution cost model", "manual": false}
         }
     """
 
