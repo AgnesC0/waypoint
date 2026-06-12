@@ -26,7 +26,6 @@ _TRANSP   = 'black'
 _PILL     = '#2d2d2d'
 _SEP      = '#484848'
 _DOT      = '#32d74b'
-_CK_ENDED = '#1D9E75'   # recently-ended session check
 _TXT_ON   = '#e8e8e8'   # active workspace name
 _TXT_OFF  = '#8e8e93'   # inactive workspace names + hints
 _TXT_META = '#6e6e73'   # recency — most subtle
@@ -145,7 +144,6 @@ class HUD:
         # command, dirty files) land here without touching hints.json so they
         # never overwrite manual annotations.  Rebuilt from scratch every cycle.
         self._live_hints: dict[str, str] = {}
-        self._recently_ended: dict[str, float] = {}  # name → unix ts of end
 
         self._px = self._py = 0
         self._ox = self._oy = 0
@@ -295,9 +293,6 @@ class HUD:
         if live:
             cv.create_text(_X_CK, y + _Y_ITEM_NAME, anchor='w',
                            text='✓', fill=_DOT, font=_F_CK, tags=tag)
-        elif name in self._recently_ended:
-            cv.create_text(_X_CK, y + _Y_ITEM_NAME, anchor='w',
-                           text='✓', fill=_CK_ENDED, font=_F_CK, tags=tag)
         cv.create_text(_X_NAME, y + _Y_ITEM_NAME, anchor='w',
                        text=name,
                        fill=_TXT_ON if live else (_TXT_META if untracked else _TXT_OFF),
@@ -445,20 +440,11 @@ class HUD:
         prev_names = {ws.name for ws in self._workspaces}
         curr_names  = {ws.name for ws in workspaces}
         for name in prev_names - curr_names:
-            self._recently_ended[name] = now
             print(f"[waypoint] removed: {name!r}", file=sys.stderr, flush=True)
 
-        # Clear the recently-ended marker as soon as a workspace is detected
-        # again so a re-opened terminal never carries a stale indicator.
-        for name in curr_names - prev_names:
-            self._recently_ended.pop(name, None)
-            if getattr(self.detector, '_debug', False):
+        if getattr(self.detector, '_debug', False):
+            for name in curr_names - prev_names:
                 print(f"[waypoint] detected: {name!r}", file=sys.stderr, flush=True)
-
-        # Keep the ✓ indicator visible briefly; 30 s is enough to notice.
-        self._recently_ended = {
-            n: t for n, t in self._recently_ended.items() if now - t < 30
-        }
 
         self._workspaces = workspaces
         valid = {ws.name: ws for ws in workspaces}
