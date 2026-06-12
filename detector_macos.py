@@ -260,26 +260,112 @@ class MacOSDetector(BaseDetector):
         tab_idx = workspace.tab_index or 1
         if not isinstance(tab_idx, int):
             return
-        # Set index to 1 (front of Terminal's window stack) without calling
-        # `activate`, which would raise every Terminal window.  Then use
-        # AXRaise via System Events to bring only that window to the screen
-        # foreground.
+        # Terminal's scripting API and System Events walk windows in the same
+        # z-order, so the index found in the Terminal tell-block is valid in the
+        # System Events tell-block with no translation.
+        # AXRaise raises only the target window without activating Terminal.app,
+        # so other Terminal windows stay where they are.
+        # Avoided: `activate` (activates whole app) and `set index of w to 1`
+        # (modifying a background app's window order triggers implicit activation
+        # on macOS, same effect as activate).
+        if self._debug:
+            self._focus_debug(workspace, tab_idx)
+            return
         _applescript(f"""
+        set targetIdx to 0
         tell application "Terminal"
-            repeat with w in windows
+            set allWins to windows
+            repeat with i from 1 to count of allWins
+                set w to item i of allWins
                 if (id of w as string) is "{workspace.window_id}" then
                     if miniaturized of w then set miniaturized of w to false
                     try
                         set selected tab of w to tab {tab_idx} of w
                     end try
-                    set index of w to 1
+                    set targetIdx to i
                     exit repeat
                 end if
             end repeat
         end tell
-        tell application "System Events"
-            tell process "Terminal"
-                perform action "AXRaise" of window 1
+        if targetIdx > 0 then
+            tell application "System Events"
+                tell process "Terminal"
+                    perform action "AXRaise" of window targetIdx
+                end tell
             end tell
-        end tell
+        end if
         """)
+
+    # ── Debug-mode focus ──────────────────────────────────────────────────────
+
+    def _focus_debug(self, workspace: Workspace, tab_idx: int) -> None:
+        """focus() with full before/after state logging to stderr."""
+        import sys
+
+        def _state() -> str:
+            return _applescript("""
+            tell application "System Events"
+                set fa to name of first application process whose frontmost is true
+                try
+                    tell process "Terminal"
+                        set tf to frontmost as string
+                        set wnames to {}
+                        set allW to windows
+                        repeat with i from 1 to count of allW
+                            set end of wnames to (i as string) & ":" & (name of item i of allW)
+                        end repeat
+                        set AppleScript's text item delimiters to "  |  "
+                        set ws to wnames as string
+                        set AppleScript's text item delimiters to ""
+                    end tell
+                on error
+                    set tf to "no-terminal-process"
+                    set ws to ""
+                end try
+                return "frontmost=" & fa & "  term_front=" & tf & "  term_wins=[" & ws & "]"
+            end tell
+            """)
+
+        print(
+            f"\n[focus-debug] ── {workspace.name!r} ──────────────────────",
+            file=sys.stderr, flush=True,
+        )
+        print(
+            f"[focus-debug]  target window_id={workspace.window_id!r}"
+            f"  tab_index={tab_idx}"
+            f"  tty={workspace.tty!r}",
+            file=sys.stderr, flush=True,
+        )
+        print(
+            f"[focus-debug]  commands: AXRaise=YES  activate=NO  set_index=NO",
+            file=sys.stderr, flush=True,
+        )
+        print(f"[focus-debug]  BEFORE: {_state()}", file=sys.stderr, flush=True)
+
+        # Run the identical script used in normal mode
+        _applescript(f"""
+        set targetIdx to 0
+        tell application "Terminal"
+            set allWins to windows
+            repeat with i from 1 to count of allWins
+                set w to item i of allWins
+                if (id of w as string) is "{workspace.window_id}" then
+                    if miniaturized of w then set miniaturized of w to false
+                    try
+                        set selected tab of w to tab {tab_idx} of w
+                    end try
+                    set targetIdx to i
+                    exit repeat
+                end if
+            end repeat
+        end tell
+        if targetIdx > 0 then
+            tell application "System Events"
+                tell process "Terminal"
+                    perform action "AXRaise" of window targetIdx
+                end tell
+            end tell
+        end if
+        """)
+
+        print(f"[focus-debug]  AFTER:  {_state()}", file=sys.stderr, flush=True)
