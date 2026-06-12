@@ -6,8 +6,10 @@ Answers three questions at a glance:
   2. What was I doing?     — each row: resume hint
   3. How long since I was there? — each row: relative recency
 
-All configured workspaces are shown in fixed config.yaml order so spatial
-memory stays stable. Open workspaces (active terminal) are clickable.
+Only workspaces with an active terminal are shown.  A row is added at
+the next poll after a terminal opens and removed at the next poll after
+it closes.  Configured workspaces keep their config.yaml order; untracked
+terminals are appended below.
 """
 
 import sys
@@ -444,8 +446,18 @@ class HUD:
         curr_names  = {ws.name for ws in workspaces}
         for name in prev_names - curr_names:
             self._recently_ended[name] = now
+            print(f"[waypoint] removed: {name!r}", file=sys.stderr, flush=True)
+
+        # Clear the recently-ended marker as soon as a workspace is detected
+        # again so a re-opened terminal never carries a stale indicator.
+        for name in curr_names - prev_names:
+            self._recently_ended.pop(name, None)
+            if getattr(self.detector, '_debug', False):
+                print(f"[waypoint] detected: {name!r}", file=sys.stderr, flush=True)
+
+        # Keep the ✓ indicator visible briefly; 30 s is enough to notice.
         self._recently_ended = {
-            n: t for n, t in self._recently_ended.items() if now - t < 1800
+            n: t for n, t in self._recently_ended.items() if now - t < 30
         }
 
         self._workspaces = workspaces

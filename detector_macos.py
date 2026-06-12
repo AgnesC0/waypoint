@@ -255,6 +255,10 @@ class MacOSDetector(BaseDetector):
                 pid=pid,
             )
 
+        if self._debug:
+            detected = sorted(workspace_map.keys())
+            print(f"[poll] result: {detected if detected else '(none)'}", flush=True)
+
         return sorted(workspace_map.values(),
                       key=lambda ws: self._order.get(ws.name, len(self._projects)))
 
