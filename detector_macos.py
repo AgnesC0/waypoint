@@ -255,7 +255,11 @@ class MacOSDetector(BaseDetector):
     def focus(self, workspace: Workspace) -> None:
         if not workspace.window_id:
             return
+        if not str(workspace.window_id).isdigit():
+            return
         tab_idx = workspace.tab_index or 1
+        if not isinstance(tab_idx, int):
+            return
         # Set index to 1 (front of Terminal's window stack) without calling
         # `activate`, which would raise every Terminal window.  Then use
         # AXRaise via System Events to bring only that window to the screen

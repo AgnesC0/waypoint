@@ -33,4 +33,5 @@ env/
 
 # ── Logs and local overrides ─────────────────────────────────
 *.log
+config.yaml
 config.local.yaml

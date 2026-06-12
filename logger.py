@@ -96,7 +96,7 @@ class WorkspaceLogger:
 
     def __init__(self, log_path: str = _LOG_PATH) -> None:
         self._log_path = log_path
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True, mode=0o700)
         # name → {start_time, ws, task_keyword, confidence}
         self._sessions: dict[str, dict] = {}
 
@@ -478,7 +478,7 @@ def write_current_session(
     silently swallowed so a missing ~/.waypoint dir never crashes the HUD.
     """
     try:
-        os.makedirs(_LOG_DIR, exist_ok=True)
+        os.makedirs(_LOG_DIR, exist_ok=True, mode=0o700)
         if project is None:
             content = "null\n"
         else:
@@ -621,7 +621,7 @@ class HintStore:
 
     def _persist(self) -> None:
         try:
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            os.makedirs(os.path.dirname(self._path), exist_ok=True, mode=0o700)
             with open(self._path, "w") as fh:
                 json.dump(self._hints, fh, indent=2)
             self._mtime = os.path.getmtime(self._path)
@@ -678,7 +678,7 @@ class LastSeenStore:
 
     def _persist(self) -> None:
         try:
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            os.makedirs(os.path.dirname(self._path), exist_ok=True, mode=0o700)
             with open(self._path, "w") as fh:
                 json.dump(self._data, fh, indent=2)
         except OSError:
