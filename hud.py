@@ -366,8 +366,42 @@ class HUD:
         if self._dragged:
             return
         ws = next((w for w in self._workspaces if w.name == name), None)
+        self._logger.record_hud_click(name)
+        _dbg = getattr(self.detector, '_debug', False)
+        if _dbg:
+            import subprocess, sys
+            _r = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to return '
+                 'name of first application process whose frontmost is true'],
+                capture_output=True, text=True, timeout=3,
+            )
+            print(
+                f"\n[click] project={name!r}"
+                f"  tty={getattr(ws, 'tty', '?')!r}"
+                f"  window_id={getattr(ws, 'window_id', '?')!r}"
+                f"  tab_index={getattr(ws, 'tab_index', '?')!r}",
+                file=sys.stderr, flush=True,
+            )
+            print(
+                f"[click] frontmost AT CLICK TIME (before focus): "
+                f"{_r.stdout.strip()!r}",
+                file=sys.stderr, flush=True,
+            )
         if ws:
             self.detector.focus(ws)
+        if _dbg:
+            import subprocess, sys
+            _r2 = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to return '
+                 'name of first application process whose frontmost is true'],
+                capture_output=True, text=True, timeout=3,
+            )
+            print(
+                f"[click] frontmost AFTER focus: {_r2.stdout.strip()!r}",
+                file=sys.stderr, flush=True,
+            )
         self._current_name     = name
         self._context_since    = time.time()
         self._last_active_name = name
@@ -465,6 +499,7 @@ class HUD:
             h = self._hints.update_from_workspace(ws)
             if h:
                 self._live_hints[ws.name] = h
+            self._logger.record_hint_type(ws.name, self._hints.last_hint_type(ws.name))
             self._last_seen.touch(ws.name)
 
         self._redraw()

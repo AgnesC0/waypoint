@@ -97,8 +97,23 @@ class WorkspaceLogger:
     def __init__(self, log_path: str = _LOG_PATH) -> None:
         self._log_path = log_path
         os.makedirs(os.path.dirname(log_path), exist_ok=True, mode=0o700)
-        # name → {start_time, ws, task_keyword, confidence}
+        # name → {start_time, ws, context, hud_clicked, depth}
         self._sessions: dict[str, dict] = {}
+
+        # ── CogPass training-data state (all in-memory, never persisted as-is) ─
+        # Calendar-day ordinal used to reset daily counters at midnight.
+        self._cogpass_today:      int                    = datetime.now().toordinal()
+        # Per-workspace visit counter for the current calendar day.
+        # Keys are workspace names — only len() is ever written to disk.
+        self._today_depths:       dict[str, int]         = {}
+        # Set of workspace names seen today — only len() is ever written to disk.
+        self._today_workspaces:   set[str]               = set()
+        # Names where a HUD click arrived before the session was registered
+        # (2-second poll gap).  Consumed by _emit_start / _emit_switch.
+        self._pending_hud_clicks: set[str]               = set()
+        # Latest hint-type label per workspace, written every poll cycle by the
+        # HUD and popped (consumed) when the session ends.
+        self._session_hint_type:  dict[str, Optional[str]] = {}
 
     def update(self, workspaces: list[Workspace]) -> None:
         """Diff current workspace set against previous; emit events for changes."""
@@ -128,14 +143,57 @@ class WorkspaceLogger:
         for name in list(self._sessions):
             self._emit_end(name, "app_quit", now)
 
+    # ── CogPass signal API ────────────────────────────────────────────────────
+
+    def record_hud_click(self, name: str) -> None:
+        """Mark that the user navigated to this workspace by clicking the HUD.
+
+        Sets recommendation_accepted=True on the session's cogpass record.
+        If the session is not yet registered (click arrived during the 2-second
+        poll gap), the flag is staged and consumed by _emit_start/_emit_switch.
+        """
+        if name in self._sessions:
+            self._sessions[name]["hud_clicked"] = True
+        else:
+            self._pending_hud_clicks.add(name)
+
+    def record_hint_type(self, name: str, hint_type: Optional[str]) -> None:
+        """Store the hint-type label shown for this workspace this poll cycle.
+
+        Only enum labels from _HINT_TYPES are accepted; None is also valid.
+        The hint TEXT is never passed here — callers must resolve it to a label
+        before calling.  The latest value before session end is what gets written.
+        """
+        if hint_type in _HINT_TYPES or hint_type is None:
+            self._session_hint_type[name] = hint_type
+
+    # ── CogPass daily-counter helper ──────────────────────────────────────────
+
+    def _refresh_today(self, now: float) -> None:
+        """Reset per-day counters when the calendar day has rolled over."""
+        today = datetime.fromtimestamp(now).toordinal()
+        if today != self._cogpass_today:
+            self._cogpass_today = today
+            self._today_depths.clear()
+            self._today_workspaces.clear()
+
     # ── Event emitters ────────────────────────────────────────────────────────
 
     def _emit_start(self, ws: Workspace, now: float) -> None:
         context = self._infer_task(ws)
+
+        self._refresh_today(now)
+        self._today_workspaces.add(ws.name)
+        self._today_depths[ws.name] = self._today_depths.get(ws.name, 0) + 1
+        hud_clicked = ws.name in self._pending_hud_clicks
+        self._pending_hud_clicks.discard(ws.name)
+
         self._sessions[ws.name] = {
-            "start_time": now,
-            "ws":         ws,
-            "context":    context,
+            "start_time":  now,
+            "ws":          ws,
+            "context":     context,
+            "hud_clicked": hud_clicked,
+            "depth":       self._today_depths[ws.name],
         }
         self._write({
             "event_type":         "workspace_start",
@@ -155,8 +213,9 @@ class WorkspaceLogger:
         })
 
     def _emit_end(self, name: str, end_reason: str, now: float) -> None:
-        session = self._sessions.pop(name)
-        ws = session["ws"]
+        session   = self._sessions.pop(name)
+        task_load = len(self._sessions)   # other concurrent sessions after this one ends
+        ws        = session["ws"]
         self._write({
             "event_type":         "workspace_end",
             "timestamp":          now,
@@ -173,14 +232,21 @@ class WorkspaceLogger:
             "current_workspace":  None,
             "end_reason":         end_reason,
         })
-        self._append_completed(name, session["start_time"], now, end_reason)
+        self._append_completed(
+            name, session["start_time"], now, end_reason,
+            task_load             = task_load,
+            session_depth         = session.get("depth", 1),
+            workspace_count_today = session.get("workspace_count_today", len(self._today_workspaces)),
+            hud_clicked           = session.get("hud_clicked", False),
+        )
 
     def _emit_switch(
         self, ended_name: str, started_name: str, current: dict, now: float
     ) -> None:
-        session  = self._sessions.pop(ended_name)
-        new_ws   = current[started_name]
-        context  = self._infer_task(new_ws)
+        session   = self._sessions.pop(ended_name)
+        task_load = len(self._sessions)   # concurrent sessions after ended one is removed
+        new_ws    = current[started_name]
+        context   = self._infer_task(new_ws)
 
         self._write({
             "event_type":         "workspace_switch",
@@ -199,12 +265,26 @@ class WorkspaceLogger:
             "end_reason":         "switch_workspace",
         })
 
-        self._append_completed(ended_name, session["start_time"], now, "switch_workspace")
+        self._append_completed(
+            ended_name, session["start_time"], now, "switch_workspace",
+            task_load             = task_load,
+            session_depth         = session.get("depth", 1),
+            workspace_count_today = session.get("workspace_count_today", len(self._today_workspaces)),
+            hud_clicked           = session.get("hud_clicked", False),
+        )
+
+        self._refresh_today(now)
+        self._today_workspaces.add(started_name)
+        self._today_depths[started_name] = self._today_depths.get(started_name, 0) + 1
+        hud_clicked_new = started_name in self._pending_hud_clicks
+        self._pending_hud_clicks.discard(started_name)
 
         self._sessions[started_name] = {
-            "start_time": now,
-            "ws":         new_ws,
-            "context":    context,
+            "start_time":  now,
+            "ws":          new_ws,
+            "context":     context,
+            "hud_clicked": hud_clicked_new,
+            "depth":       self._today_depths[started_name],
         }
 
     # ── JSONL writer ─────────────────────────────────────────────────────────
@@ -217,9 +297,24 @@ class WorkspaceLogger:
             pass
 
     def _append_completed(
-        self, name: str, start_time: float, end_time: float, end_reason: str
+        self,
+        name: str,
+        start_time: float,
+        end_time: float,
+        end_reason: str,
+        *,
+        task_load: int,
+        session_depth: int,
+        workspace_count_today: int,
+        hud_clicked: bool,
     ) -> None:
-        """Append one completed-session record to completed_sessions.jsonl."""
+        """Append one record to completed_sessions.jsonl (unchanged) and
+        one privacy-reduced record to cogpass_sessions.jsonl.
+
+        cogpass_sessions.jsonl never contains: project name, paths, commands,
+        window titles, git context, absolute timestamps, or any identifier.
+        """
+        # ── completed_sessions.jsonl — format unchanged ───────────────────────
         try:
             record = {
                 "project":          name,
@@ -233,6 +328,28 @@ class WorkspaceLogger:
             }
             with open(_COMPLETED_PATH, "a") as fh:
                 fh.write(json.dumps(record) + "\n")
+        except OSError:
+            pass
+
+        # ── cogpass_sessions.jsonl — privacy-reduced training record ──────────
+        # Pop the hint-type label recorded during the session; None if absent.
+        hint_type = self._session_hint_type.pop(name, None)
+        try:
+            cogpass = {
+                "schema_version":        1,
+                "hour":                  datetime.fromtimestamp(start_time).hour,
+                "day":                   _weekday_sunday_zero(start_time),
+                "duration_seconds":      round(end_time - start_time, 2),
+                "end_reason":            end_reason,
+                "task_load":             task_load,
+                "session_depth":         session_depth,
+                "workspace_count_today": workspace_count_today,
+                "hint_type":             hint_type,
+                "recommendation_accepted": hud_clicked,
+                "feedback_label":        None,
+            }
+            with open(_COGPASS_PATH, "a") as fh:
+                fh.write(json.dumps(cogpass) + "\n")
         except OSError:
             pass
 
@@ -462,6 +579,11 @@ def infer_context(ws: Workspace) -> str:
 
 _CURRENT_SESSION_PATH = os.path.join(_LOG_DIR, "current_session.json")
 _COMPLETED_PATH       = os.path.join(_LOG_DIR, "completed_sessions.jsonl")
+_COGPASS_PATH         = os.path.join(_LOG_DIR, "cogpass_sessions.jsonl")
+
+# Allowed enum labels for cogpass hint_type.  Only these values may be written;
+# the actual hint text is never stored.
+_HINT_TYPES = frozenset({"manual", "semantic_diff", "commit", "foreground_cmd"})
 
 
 def _weekday_sunday_zero(ts: float) -> int:
@@ -520,8 +642,16 @@ class HintStore:
         self._path  = path
         self._mtime: float = 0.0
         self._hints: dict[str, dict] = self._load()
+        # Most-recently-computed hint-type label per workspace.  Set as a side
+        # effect of update_from_workspace(); read by WorkspaceLogger via
+        # last_hint_type().  Only enum labels — hint text is never stored here.
+        self._last_hint_type: dict[str, Optional[str]] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def last_hint_type(self, name: str) -> Optional[str]:
+        """Return the hint-type label computed during the last update_from_workspace call."""
+        return self._last_hint_type.get(name)
 
     def get(self, name: str) -> Optional[str]:
         self._maybe_reload()
@@ -562,25 +692,31 @@ class HintStore:
         # 1. Manual hint
         entry = self._hints.get(ws.name)
         if isinstance(entry, dict) and entry.get("manual"):
+            self._last_hint_type[ws.name] = "manual"
             return entry["hint"]
 
         # 2. Semantic working-tree diff (display-only; hints.json untouched)
         semantic = _git_semantic_hint(ws.path)
         if semantic:
+            self._last_hint_type[ws.name] = "semantic_diff"
             return semantic
 
         # 3. Last commit subject (persisted so hint survives a clean tree)
         commit_hint = _git_last_commit(ws.path)
         if commit_hint:
             self._set_auto(ws.name, commit_hint)
+            self._last_hint_type[ws.name] = "commit"
             return commit_hint
 
         # 4. Specific foreground command filtered for generic tools (display-only)
         cmd = _foreground_command(ws.tty, ws.pid)
         if cmd:
+            self._last_hint_type[ws.name] = "foreground_cmd"
             return cmd
 
-        return self.get(ws.name)
+        stored = self.get(ws.name)
+        self._last_hint_type[ws.name] = "commit" if stored else None
+        return stored
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
