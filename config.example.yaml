@@ -13,6 +13,12 @@ position: bottom-right # top-left | top-right | bottom-left | bottom-right
 # exclude:
 #   - ~/waypoint
 
+# Optional: anonymous behavioral telemetry (opt-in, disabled by default).
+# When enabled, only privacy-reduced session summaries are sent — no workspace
+# names, paths, commands, PIDs, or tty values are ever included.
+# telemetry:
+#   enabled: false
+
 projects:
   - name: MyProject
     path: ~/projects/my-project

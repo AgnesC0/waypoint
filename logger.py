@@ -350,6 +350,9 @@ class WorkspaceLogger:
             }
             with open(_SESSION_LOG_PATH, "a") as fh:
                 fh.write(json.dumps(session_record) + "\n")
+            # TODO(telemetry): if opt-in is enabled in config, call
+            #   telemetry.emit(session_record) here.  session_record is already
+            #   privacy-reduced: no names, paths, PIDs, tty, or timestamps.
         except OSError:
             pass
 

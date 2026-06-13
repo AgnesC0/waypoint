@@ -41,6 +41,18 @@ projects:
     path: ~/code/my-app
 ```
 
+## Privacy
+
+Waypoint runs entirely on your local machine. By default:
+
+- **No telemetry or network requests are made.**
+- Workspace names, paths, working directories, PIDs, tty device paths, and window IDs are used only for local detection and display. They are never transmitted anywhere.
+- Session timing and behavioral patterns (session length, switch frequency) are written to `~/.waypoint/` for local use only.
+
+If opt-in anonymous telemetry is added in a future version, it will:
+- Require an explicit `telemetry: enabled: true` line in `config.yaml` — disabled by default.
+- Send only coarse, anonymous behavioral signals (session duration, time-of-day, hint type). No workspace names, paths, commands, or identifiers will be included.
+
 ## Roadmap
 
 - [ ] Git root detection for subdirectory support
