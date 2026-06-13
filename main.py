@@ -23,12 +23,14 @@ Print live detection state for debugging:
 import argparse
 import os
 import sys
+import threading
 import time
 import tkinter as tk
 from typing import Optional
 
 import yaml
 
+import telemetry
 from detector import Detector
 from hud import HUD
 from logger import HintStore, LastSeenStore
@@ -192,6 +194,10 @@ def main() -> None:
 
     args   = parser.parse_args()
     config = load_config()
+
+    # Fire-and-forget: runs in a daemon thread so it never blocks startup.
+    # No-op when telemetry.enabled is absent or false.
+    threading.Thread(target=telemetry.maybe_emit, args=(config,), daemon=True).start()
 
     if args.cmd == "hint":
         _cmd_hint(args, config)

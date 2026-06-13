@@ -47,11 +47,31 @@ Waypoint runs entirely on your local machine. By default:
 
 - **No telemetry or network requests are made.**
 - Workspace names, paths, working directories, PIDs, tty device paths, and window IDs are used only for local detection and display. They are never transmitted anywhere.
-- Session timing and behavioral patterns (session length, switch frequency) are written to `~/.waypoint/` for local use only.
+- Session timing and behavioral patterns are written to `~/.waypoint/` for local use only.
 
-If opt-in anonymous telemetry is added in a future version, it will:
-- Require an explicit `telemetry: enabled: true` line in `config.yaml` — disabled by default.
-- Send only coarse, anonymous behavioral signals (session duration, time-of-day, hint type). No workspace names, paths, commands, or identifiers will be included.
+**Optional anonymous usage counting** can be enabled by adding to `config.yaml`:
+
+```yaml
+telemetry:
+  enabled: true
+  endpoint: https://your-collection-endpoint
+```
+
+When enabled, the complete payload sent is:
+
+```json
+{
+  "install_id": "<random uuid4, generated on first opt-in>",
+  "event":      "install" | "heartbeat",
+  "date":       "YYYY-MM-DD",
+  "platform":   "darwin" | "win32",
+  "schema":     1
+}
+```
+
+- `install_id` is a randomly generated UUID with no connection to any account, username, or machine identifier. It is stored in `~/.waypoint/install_id` and only created after opt-in.
+- At most one event is sent per calendar day.
+- **Nothing else is ever sent.** Workspace names, paths, terminal commands, code, git data, session durations, and all other local data remain local only.
 
 ## Roadmap
 
