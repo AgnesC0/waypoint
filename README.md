@@ -2,7 +2,7 @@
 
 A floating window that remembers where you left off across coding projects.
 
-(GIF)
+![Waypoint Demo](waypoint_demo.gif)
 
 ## Why
 
@@ -16,18 +16,15 @@ Waypoint keeps that context visible.
 
 ## Features
 
-- Auto detects active projects
-- Shows last working hint
-- One-click jump back
+- Automatically detects active coding projects
+- Remembers where you left off
+- One-click jump back to the correct terminal
 - Marks recently ended sessions
-
-## Demo
-
-(GIF)
+- Reduces context switching
 
 ## Install
 
-```
+```bash
 git clone https://github.com/AgnesC0/waypoint
 cd waypoint
 pip install -r requirements.txt
@@ -36,7 +33,7 @@ python main.py
 
 ## Config
 
-`config.yaml` is optional. Without it, any directory with an active terminal session appears automatically. Add entries to give projects friendly display names:
+`config.yaml` is optional. Add entries to give projects friendly names:
 
 ```yaml
 projects:
@@ -44,22 +41,16 @@ projects:
     path: ~/code/my-app
 ```
 
-## Privacy
+## Local-first
 
-Runs locally by default. No telemetry unless explicitly enabled.
-
-If you want to opt in to anonymous install counting, add to `config.yaml`:
-
-```yaml
-telemetry:
-  enabled: true
-  endpoint: https://your-collection-endpoint
-```
-
-The complete payload is five fields: a random UUID (generated on first opt-in, no link to any account or machine identifier), event type, date, platform, and schema version. Workspace names, paths, code, git data, session content, and terminal commands are never sent.
+- Runs locally
+- No account required
+- No cloud dependency
+- Anonymous telemetry is optional and disabled by default
 
 ## Roadmap
 
-- [ ] Better context recovery
-- [ ] Multi-monitor
-- [ ] Team mode
+- Better context recovery
+- Smarter project hints
+- Cross-platform improvements
+- Team mode
